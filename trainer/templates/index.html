@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Projects — Trainer{% endblock %}
+
+{% block content %}
+<h1>Projects</h1>
+
+<div class="card">
+  <form class="inline" method="post" action="/projects">
+    <label for="taxon-input">Taxon name</label>
+    <input
+      type="text"
+      name="taxon"
+      required
+      pattern="[a-z_\-]+"
+      title="Lowercase letters, underscores and hyphens only"
+      autocomplete="off"
+      id="taxon-input"
+    >
+    <button type="submit">Create project</button>
+  </form>
+</div>
+
+{% if projects %}
+<table>
+  <thead>
+    <tr>
+      <th>Taxon</th>
+      <th>Created</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in projects %}
+    <tr>
+      <td><a href="/projects/{{ p.taxon }}">{{ p.taxon }}</a></td>
+      <td>{{ p.created[:10] }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No projects yet.</p>
+{% endif %}
+
+<script>
+  // Normalise input to lowercase as the user types
+  document.getElementById("taxon-input").addEventListener("input", function () {
+    const pos = this.selectionStart;
+    this.value = this.value.toLowerCase();
+    this.setSelectionRange(pos, pos);
+  });
+</script>
+{% endblock %}

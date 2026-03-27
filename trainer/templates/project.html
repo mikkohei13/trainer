@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}{{ project.taxon }} — Trainer{% endblock %}
+
+{% block content %}
+<h1>{{ project.taxon }}</h1>
+
+<h2>Images per collection</h2>
+{% if stats.collections %}
+<table>
+  <thead>
+    <tr>
+      <th>Collection</th>
+      <th>Images</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in stats.collections %}
+    <tr>
+      <td>{{ c.name }}</td>
+      <td>{{ c.count }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No collections found.</p>
+{% endif %}
+
+<h2>Images per taxon</h2>
+{% if stats.taxa %}
+<table>
+  <thead>
+    <tr>
+      <th>Taxon</th>
+      <th>Images</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in stats.taxa %}
+    <tr>
+      <td>{{ t.taxon }}</td>
+      <td>{{ t.count }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No taxon folders found.</p>
+{% endif %}
+{% endblock %}

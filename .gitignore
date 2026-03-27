@@ -4,6 +4,7 @@
 
 .env
 secrets.py
+*.db
 
 # Mac
 .DS_Store
