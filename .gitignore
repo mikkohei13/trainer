@@ -1,10 +1,12 @@
 **/secrets/**
 **/secret/**
 **/images/**
+**/models/**
 
 .env
-secrets.py
+trainer_secrets.py
 *.db
+*.pt
 
 # Mac
 .DS_Store

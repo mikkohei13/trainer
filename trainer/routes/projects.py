@@ -50,7 +50,8 @@ def project_detail(taxon: str):
     if project is None:
         return redirect(url_for("projects.index"))
     stats = project_stats(taxon)
-    return render_template("project.html", project=project, stats=stats)
+    training_runs = db.get_training_runs(project["id"])
+    return render_template("project.html", project=project, stats=stats, training_runs=training_runs)
 
 
 @bp.get("/projects/<taxon>/annotation-gallery")

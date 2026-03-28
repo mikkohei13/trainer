@@ -61,6 +61,41 @@
   {% endif %}
 </section>
 
+<section class="card" aria-labelledby="models-heading">
+  <h2 id="models-heading">Models</h2>
+  <form method="post" action="{{ url_for('models.start_training', taxon=project.taxon) }}" style="margin-bottom: 1rem;">
+    <button type="submit">Start training</button>
+  </form>
+  {% if training_runs %}
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Run</th>
+        <th scope="col">Started</th>
+        <th scope="col">Finished</th>
+        <th scope="col">Status</th>
+        <th scope="col" class="num">mAP50</th>
+        <th scope="col" class="num">mAP50-95</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in training_runs %}
+      <tr>
+        <td>{{ run.id }}</td>
+        <td>{{ run.started_at[:19] }}</td>
+        <td>{{ run.finished_at[:19] if run.finished_at else "—" }}</td>
+        <td>{{ run.status }}</td>
+        <td class="num">{{ run.map50 | round(3) if run.map50 is not none else "—" }}</td>
+        <td class="num">{{ run.map50_95 | round(3) if run.map50_95 is not none else "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No training runs yet.</p>
+  {% endif %}
+</section>
+
 <h2>Images per collection</h2>
 {% if stats.collections %}
 <table>

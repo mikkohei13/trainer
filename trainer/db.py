@@ -36,6 +36,19 @@ def init_db() -> None:
                 image_path  TEXT PRIMARY KEY
             )
         """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS training_run (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id   INTEGER NOT NULL REFERENCES project(id),
+                status       TEXT NOT NULL,
+                started_at   TEXT NOT NULL,
+                finished_at  TEXT,
+                model_path   TEXT,
+                map50        REAL,
+                map50_95     REAL,
+                log_path     TEXT
+            )
+        """)
 
 
 def get_projects() -> list[sqlite3.Row]:
@@ -127,6 +140,63 @@ def get_annotations(image_path: str) -> dict:
                 "h": row["h"],
             })
         return {"boxes": boxes, "no_organism": no_organism}
+
+
+def create_training_run(project_id: int) -> int:
+    started_at = datetime.now(timezone.utc).isoformat()
+    with get_connection() as con:
+        cur = con.execute(
+            "INSERT INTO training_run (project_id, status, started_at) VALUES (?, 'training', ?)",
+            (project_id, started_at),
+        )
+        return cur.lastrowid
+
+
+def finish_training_run(
+    run_id: int,
+    model_path: str,
+    map50: float | None,
+    map50_95: float | None,
+    log_path: str,
+) -> None:
+    finished_at = datetime.now(timezone.utc).isoformat()
+    with get_connection() as con:
+        con.execute(
+            """
+            UPDATE training_run
+            SET status = 'done', finished_at = ?, model_path = ?,
+                map50 = ?, map50_95 = ?, log_path = ?
+            WHERE id = ?
+            """,
+            (finished_at, model_path, map50, map50_95, log_path, run_id),
+        )
+
+
+def fail_training_run(run_id: int, log_path: str) -> None:
+    finished_at = datetime.now(timezone.utc).isoformat()
+    with get_connection() as con:
+        con.execute(
+            "UPDATE training_run SET status = 'failed', finished_at = ?, log_path = ? WHERE id = ?",
+            (finished_at, log_path, run_id),
+        )
+
+
+def get_training_runs(project_id: int) -> list[sqlite3.Row]:
+    with get_connection() as con:
+        return con.execute(
+            "SELECT * FROM training_run WHERE project_id = ? ORDER BY id DESC",
+            (project_id,),
+        ).fetchall()
+
+
+def fail_stale_training_runs() -> None:
+    """Mark any runs still in 'training' status as failed (app was restarted mid-run)."""
+    finished_at = datetime.now(timezone.utc).isoformat()
+    with get_connection() as con:
+        con.execute(
+            "UPDATE training_run SET status = 'failed', finished_at = ? WHERE status = 'training'",
+            (finished_at,),
+        )
 
 
 def project_annotation_state(taxon: str) -> tuple[set[str], dict[str, int]]:

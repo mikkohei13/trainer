@@ -2,7 +2,7 @@
 Fetch occurrence images from FinBIF (api.laji.fi) into target_path: one folder per
 taxon (Genus_species), files named MM.xxxxx.jpg.
 
-API key: FINBIF_API_TOKEN in secrets.py at project root (see example.secrets.py).
+API key: FINBIF_API_TOKEN in trainer_secrets.py at project root (see example.trainer_secrets.py).
 """
 
 import importlib.util
@@ -15,12 +15,12 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-_spec = importlib.util.spec_from_file_location("trainer_secrets", PROJECT_ROOT / "secrets.py")
+_spec = importlib.util.spec_from_file_location("trainer_secrets", PROJECT_ROOT / "trainer_secrets.py")
 _secrets = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_secrets)
 TOKEN = _secrets.FINBIF_API_TOKEN.strip()
 if not TOKEN:
-    raise SystemExit("FINBIF_API_TOKEN is missing or empty in secrets.py")
+    raise SystemExit("FINBIF_API_TOKEN is missing or empty in trainer_secrets.py")
 
 API_BASE = "https://api.laji.fi"
 UNIT_MEDIA_LIST = f"{API_BASE}/warehouse/query/unitMedia/list"

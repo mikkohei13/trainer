@@ -6,6 +6,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "flask>=3.0",
+    # torch + torchvision must be a matching pair from the same release line.
+    # If you see ImportError: NP_SUPPORTED_MODULES from torch._dynamo.utils, the
+    # install is usually inconsistent — run: uv sync --reinstall-package torch --reinstall-package torchvision
+    "numpy>=1.23,<2",
+    "torch==2.4.1",
+    "torchvision==0.19.1",
+    "ultralytics",
 ]
 
 [build-system]

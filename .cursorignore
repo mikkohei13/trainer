@@ -2,7 +2,7 @@
 **/secret/**
 
 .env
-secrets.py
+trainer_secrets.py
 
 # Mac
 .DS_Store
