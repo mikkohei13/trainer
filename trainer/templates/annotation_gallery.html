@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}{{ bucket_label }} — {{ project.taxon }} — Trainer{% endblock %}
+
+{% block content %}
+<nav class="crumbs" aria-label="Breadcrumb">
+  <a href="{{ url_for('projects.index') }}">Projects</a>
+  <span class="crumb-sep">/</span>
+  <a href="{{ url_for('projects.project_detail', taxon=project.taxon) }}">{{ project.taxon }}</a>
+  <span class="crumb-sep">/</span>
+  <span>{{ bucket_label }}</span>
+</nav>
+
+<h1>{{ bucket_label }}</h1>
+<p class="gallery-meta">
+  <strong>{{ total_count }}</strong> image{% if total_count != 1 %}s{% endif %}
+  {% if total_pages > 1 %}
+  · Page {{ page }} of {{ total_pages }}
+  {% endif %}
+</p>
+
+{% if image_paths %}
+<ul class="thumb-grid" role="list">
+  {% for p in image_paths %}
+  <li class="thumb-item">
+    <a
+      class="thumb-link"
+      href="{{ url_for('annotate.annotate', taxon=project.taxon, path=p) }}"
+      title="Annotate: {{ p }}"
+    >
+      <img
+        class="thumb-img"
+        src="{{ url_for('annotate.serve_image', filename=p) }}"
+        alt=""
+        loading="lazy"
+      >
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+
+{% if total_pages > 1 %}
+<nav class="pagination" aria-label="Gallery pages">
+  {% if page > 1 %}
+  <a class="page-link" href="{{ url_for('projects.annotation_gallery', taxon=project.taxon, bucket=bucket_key, page=page - 1) }}">Previous</a>
+  {% else %}
+  <span class="page-link disabled">Previous</span>
+  {% endif %}
+  <span class="page-status">{{ page }} / {{ total_pages }}</span>
+  {% if page < total_pages %}
+  <a class="page-link" href="{{ url_for('projects.annotation_gallery', taxon=project.taxon, bucket=bucket_key, page=page + 1) }}">Next</a>
+  {% else %}
+  <span class="page-link disabled">Next</span>
+  {% endif %}
+</nav>
+{% endif %}
+{% else %}
+<p class="empty">No images in this category.</p>
+{% endif %}
+
+<p class="gallery-footer"><a href="{{ url_for('projects.project_detail', taxon=project.taxon) }}">← Back to project</a></p>
+{% endblock %}

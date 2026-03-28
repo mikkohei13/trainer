@@ -2,8 +2,64 @@
 {% block title %}{{ project.taxon }} — Trainer{% endblock %}
 
 {% block content %}
+{% set ann = stats.annotation %}
 <h1>{{ project.taxon }}</h1>
-<p><a href="{{ url_for('annotate.annotate', taxon=project.taxon) }}">Annotate images</a></p>
+<p class="project-actions"><a class="btn-link" href="{{ url_for('annotate.annotate', taxon=project.taxon) }}">Annotate images</a></p>
+
+<section class="card annotation-overview" aria-labelledby="anno-heading">
+  <h2 id="anno-heading">Annotation progress</h2>
+  {% if ann.total_images == 0 %}
+  <p class="empty">No images in this project yet.</p>
+  {% else %}
+  {% set done = ann.total_images - ann.not_annotated %}
+  {% set pct = (100 * done / ann.total_images) | round(1) %}
+  <p class="anno-summary">
+    <strong>{{ done }}</strong> of <strong>{{ ann.total_images }}</strong> images annotated
+    <span class="anno-pct">({{ pct }}%)</span>
+  </p>
+  <div class="progress-bar" role="progressbar" aria-valuenow="{{ pct }}" aria-valuemin="0" aria-valuemax="100" aria-label="Share of images annotated">
+    <span class="progress-bar-fill" style="width: {{ pct }}%"></span>
+  </div>
+
+  <h3 class="anno-subheading">Images by organism count</h3>
+  <table class="anno-table">
+    <thead>
+      <tr>
+        <th scope="col">Label</th>
+        <th scope="col" class="num">Images</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="row-not-done">
+        <td>
+          {% if ann.not_annotated > 0 %}
+          <a href="{{ url_for('projects.annotation_gallery', taxon=project.taxon, bucket='not_annotated') }}">Not annotated</a>
+          {% else %}
+          Not annotated
+          {% endif %}
+        </td>
+        <td class="num">{{ ann.not_annotated }}</td>
+      </tr>
+      {% for row in ann.by_organism_count %}
+      <tr>
+        <td>
+          <a href="{{ url_for('projects.annotation_gallery', taxon=project.taxon, bucket=row.organisms|string) }}">
+            {% if row.organisms == 0 %}
+            No organisms
+            {% elif row.organisms == 1 %}
+            One organism
+            {% else %}
+            {{ row.organisms }} organisms
+            {% endif %}
+          </a>
+        </td>
+        <td class="num">{{ row.count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
 
 <h2>Images per collection</h2>
 {% if stats.collections %}

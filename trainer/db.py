@@ -127,3 +127,29 @@ def get_annotations(image_path: str) -> dict:
                 "h": row["h"],
             })
         return {"boxes": boxes, "no_organism": no_organism}
+
+
+def project_annotation_state(taxon: str) -> tuple[set[str], dict[str, int]]:
+    """
+    DB state for images under trainer/images/<taxon>/.
+    Returns (paths marked no-organism, image_path -> bounding box count).
+    """
+    prefix = f"{taxon}/"
+    like = prefix + "%"
+    with get_connection() as con:
+        no_rows = con.execute(
+            "SELECT image_path FROM image_no_organism WHERE image_path LIKE ?",
+            (like,),
+        ).fetchall()
+        no_set = {r["image_path"] for r in no_rows}
+        box_rows = con.execute(
+            """
+            SELECT image_path, COUNT(*) AS n
+            FROM bounding_box
+            WHERE image_path LIKE ?
+            GROUP BY image_path
+            """,
+            (like,),
+        ).fetchall()
+        box_map = {r["image_path"]: int(r["n"]) for r in box_rows}
+    return no_set, box_map

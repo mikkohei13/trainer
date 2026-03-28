@@ -39,9 +39,11 @@ QUERY_PARAMS: dict = {
     "fields": "(photos:(id:!t,url:!t),taxon:(name:!t,rank:!t))",
 }
 
-REQUEST_DELAY_SEC = 1.0
+REQUEST_DELAY_SEC = 2.0
 
-USER_AGENT = "trainer-fetch-inaturalist/1.0 (+local dev)"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+
+
 
 
 def _headers_json() -> dict:
