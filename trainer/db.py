@@ -20,6 +20,22 @@ def init_db() -> None:
                 created TEXT NOT NULL
             )
         """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS bounding_box (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                image_path  TEXT NOT NULL,
+                anno_id     TEXT NOT NULL,
+                x           REAL NOT NULL,
+                y           REAL NOT NULL,
+                w           REAL NOT NULL,
+                h           REAL NOT NULL
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS image_no_organism (
+                image_path  TEXT PRIMARY KEY
+            )
+        """)
 
 
 def get_projects() -> list[sqlite3.Row]:
@@ -41,3 +57,73 @@ def create_project(taxon: str) -> None:
             "INSERT INTO project (taxon, created) VALUES (?, ?)",
             (taxon, created),
         )
+
+
+def save_annotations(
+    image_path: str,
+    boxes: list[dict],
+    no_organism: bool,
+) -> None:
+    """
+    Replace all stored annotation state for this image.
+    Each box dict must have keys: anno_id, x, y, w, h.
+    """
+    with get_connection() as con:
+        con.execute(
+            "DELETE FROM bounding_box WHERE image_path = ?",
+            (image_path,),
+        )
+        con.execute(
+            "DELETE FROM image_no_organism WHERE image_path = ?",
+            (image_path,),
+        )
+        if no_organism:
+            con.execute(
+                "INSERT INTO image_no_organism (image_path) VALUES (?)",
+                (image_path,),
+            )
+        else:
+            for box in boxes:
+                con.execute(
+                    """
+                    INSERT INTO bounding_box
+                    (image_path, anno_id, x, y, w, h)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        image_path,
+                        box["anno_id"],
+                        box["x"],
+                        box["y"],
+                        box["w"],
+                        box["h"],
+                    ),
+                )
+
+
+def get_annotations(image_path: str) -> dict:
+    with get_connection() as con:
+        no_row = con.execute(
+            "SELECT 1 FROM image_no_organism WHERE image_path = ?",
+            (image_path,),
+        ).fetchone()
+        no_organism = no_row is not None
+        rows = con.execute(
+            """
+            SELECT anno_id, x, y, w, h
+            FROM bounding_box
+            WHERE image_path = ?
+            ORDER BY id
+            """,
+            (image_path,),
+        ).fetchall()
+        boxes = []
+        for row in rows:
+            boxes.append({
+                "anno_id": row["anno_id"],
+                "x": row["x"],
+                "y": row["y"],
+                "w": row["w"],
+                "h": row["h"],
+            })
+        return {"boxes": boxes, "no_organism": no_organism}

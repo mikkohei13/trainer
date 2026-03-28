@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+{% block title %}Annotate — {{ project.taxon }} — Trainer{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@annotorious/annotorious@latest/dist/annotorious.css">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/annotate.css') }}">
+{% endblock %}
+
+{% block content %}
+<p><a href="{{ url_for('projects.project_detail', taxon=project.taxon) }}">← Back to {{ project.taxon }}</a></p>
+<h1>Annotate: {{ project.taxon }}</h1>
+
+{% if image_path %}
+
+<div class="annotate-toolbar">
+  <button type="button" id="btn-prev" {% if not prev_url %}disabled{% endif %}>← Prev</button>
+  <form class="jump-form" id="jump-form" method="get" action="{{ url_for('annotate.annotate', taxon=project.taxon) }}">
+    <input type="number" name="i" value="{{ current_num }}" min="1" max="{{ total }}">
+    <span class="annotate-counter">/ {{ total }}</span>
+    <button type="submit">Go</button>
+  </form>
+  <button type="button" id="btn-next" {% if not next_url %}disabled{% endif %}>Next →</button>
+  <span class="spacer"></span>
+  <button type="button" id="btn-save">Save</button>
+  <button type="button" class="secondary" id="btn-no-organism">No organisms</button>
+  <button type="button" class="danger" id="btn-clear">Clear</button>
+  <span class="annotate-status" id="annotate-status"></span>
+</div>
+
+<div class="annotate-image-wrap {% if annotations.no_organism %}no-organism{% endif %}" id="image-wrap">
+  <span id="no-organism-badge">No organisms</span>
+  <img
+    src="/images/{{ image_path }}"
+    id="annotation-image"
+    alt="Annotation target"
+  />
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@annotorious/annotorious@latest/dist/annotorious.js"></script>
+<script>
+(function () {
+  const imagePath = {{ image_path | tojson }};
+  const initialAnnotations = {{ annotations | tojson }};
+  const prevUrl = {{ prev_url | tojson }};
+  const nextUrl = {{ next_url | tojson }};
+
+  const imageWrapEl = document.getElementById("image-wrap");
+  const statusEl = document.getElementById("annotate-status");
+  const imgEl = document.getElementById("annotation-image");
+
+  let anno = null;
+  let dirty = false;
+  let skipDirtyEvents = false;
+  let currentNoOrganism = initialAnnotations.no_organism;
+
+  function encodedPathSegments(path) {
+    return path.split("/").map(function (seg) {
+      return encodeURIComponent(seg);
+    }).join("/");
+  }
+
+  function setStatus(text, isDirty) {
+    statusEl.textContent = text;
+    if (isDirty) {
+      statusEl.classList.add("dirty");
+    } else {
+      statusEl.classList.remove("dirty");
+    }
+  }
+
+  function markDirty() {
+    if (skipDirtyEvents) {
+      return;
+    }
+    dirty = true;
+    setStatus("Unsaved changes", true);
+  }
+
+  function markClean(message) {
+    dirty = false;
+    setStatus(message || "", false);
+  }
+
+  function setNoOrganism(value) {
+    currentNoOrganism = value;
+    if (value) {
+      imageWrapEl.classList.add("no-organism");
+    } else {
+      imageWrapEl.classList.remove("no-organism");
+    }
+  }
+
+  function geometryFromAnnotation(annotation) {
+    const target = annotation.target;
+    if (!target || !target.selector) {
+      return null;
+    }
+    const sel = target.selector;
+    if (sel.type !== "RECTANGLE") {
+      return null;
+    }
+    const g = sel.geometry;
+    if (!g) {
+      return null;
+    }
+    if (typeof g.x === "number" && typeof g.y === "number" &&
+        typeof g.w === "number" && typeof g.h === "number") {
+      return { x: g.x, y: g.y, w: g.w, h: g.h };
+    }
+    if (g.bounds) {
+      return {
+        x: g.bounds.minX,
+        y: g.bounds.minY,
+        w: g.bounds.maxX - g.bounds.minX,
+        h: g.bounds.maxY - g.bounds.minY,
+      };
+    }
+    return null;
+  }
+
+  function annotationFromBox(box) {
+    return {
+      id: box.anno_id,
+      bodies: [{ type: "TextualBody", purpose: "tagging", value: "organism" }],
+      target: {
+        selector: {
+          type: "RECTANGLE",
+          geometry: {
+            bounds: { minX: box.x, minY: box.y, maxX: box.x + box.w, maxY: box.y + box.h },
+            x: box.x, y: box.y, w: box.w, h: box.h,
+          },
+        },
+      },
+    };
+  }
+
+  function collectBoxes() {
+    const list = anno.getAnnotations();
+    const boxes = [];
+    for (let i = 0; i < list.length; i++) {
+      const geom = geometryFromAnnotation(list[i]);
+      if (!geom) {
+        continue;
+      }
+      boxes.push({ anno_id: list[i].id, x: geom.x, y: geom.y, w: geom.w, h: geom.h });
+    }
+    return boxes;
+  }
+
+  function initAnnotorious() {
+    anno = Annotorious.createImageAnnotator("annotation-image", { drawingEnabled: true });
+
+    anno.on("createAnnotation", function () { markDirty(); });
+    anno.on("updateAnnotation", function () { markDirty(); });
+    anno.on("deleteAnnotation", function () { markDirty(); });
+
+    if (!initialAnnotations.no_organism && initialAnnotations.boxes) {
+      skipDirtyEvents = true;
+      for (let i = 0; i < initialAnnotations.boxes.length; i++) {
+        anno.addAnnotation(annotationFromBox(initialAnnotations.boxes[i]));
+      }
+      skipDirtyEvents = false;
+    }
+  }
+
+  if (imgEl.complete) {
+    initAnnotorious();
+  } else {
+    imgEl.addEventListener("load", initAnnotorious);
+  }
+
+  async function saveAnnotations() {
+    if (!anno) {
+      return true;
+    }
+    const boxes = currentNoOrganism ? [] : collectBoxes();
+    const url = "/api/annotations/" + encodedPathSegments(imagePath);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ boxes: boxes, no_organism: currentNoOrganism }),
+    });
+    if (!res.ok) {
+      setStatus("Save failed", true);
+      return false;
+    }
+    return true;
+  }
+
+  document.getElementById("btn-save").addEventListener("click", async function () {
+    const ok = await saveAnnotations();
+    if (ok) {
+      markClean("Saved.");
+    }
+  });
+
+  document.getElementById("btn-no-organism").addEventListener("click", async function () {
+    skipDirtyEvents = true;
+    anno.clearAnnotations();
+    skipDirtyEvents = false;
+    setNoOrganism(true);
+    const ok = await saveAnnotations();
+    if (ok) {
+      markClean("Marked: no organisms.");
+    }
+  });
+
+  document.getElementById("btn-clear").addEventListener("click", function () {
+    if (!anno) {
+      return;
+    }
+    skipDirtyEvents = true;
+    anno.clearAnnotations();
+    skipDirtyEvents = false;
+    setNoOrganism(false);
+    markDirty();
+  });
+
+  async function navigateTo(url) {
+    if (dirty) {
+      const ok = await saveAnnotations();
+      if (!ok) {
+        return;
+      }
+    }
+    window.location.href = url;
+  }
+
+  document.getElementById("btn-prev").addEventListener("click", function () {
+    if (prevUrl) {
+      navigateTo(prevUrl);
+    }
+  });
+
+  document.getElementById("btn-next").addEventListener("click", function () {
+    if (nextUrl) {
+      navigateTo(nextUrl);
+    }
+  });
+
+  document.getElementById("jump-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    const input = this.querySelector("input[name='i']");
+    const i = parseInt(input.value, 10);
+    if (isNaN(i)) {
+      return;
+    }
+    const url = this.action + "?i=" + i;
+    navigateTo(url);
+  });
+})();
+</script>
+
+{% else %}
+<p class="empty">No images in this project.</p>
+{% endif %}
+
+{% endblock %}

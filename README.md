@@ -18,20 +18,11 @@ uv run flask --app trainer.app run --reload
 
 Open http://127.0.0.1:5000/ in a browser.
 
-## Project structure
+## System architecture
 
-- `trainer`: Flask web app for UI and API
-- `scripts`: Helper scripts for data fetching and processing, to be run from command line
+See ARCHITECTURE.md for the system architecture.
 
 ## Development principles
 
-- Keep it simple and clear.
-- This is one-person app, so avoid premature optimization.
-- You can expect necessary data exists, so no need for complex fallback or error messaging logic.
-- Add unit tests to ./tests for the most important features.
-- Avoid ternary operators and other shorthands, instead use clear if/else statements.
-- Avoid unnecessary complexity:
-  - No accessibility features
-  - No authentication
-  - Desktop-optimized UI, no mobile support
-  - No JavaScript frameworks
+See ARCHITECTURE.md for the development principles.
+
