@@ -133,3 +133,16 @@ def image_path_under_images_root(image_path: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def image_path_under_taxon_project(image_path: str, taxon: str) -> bool:
+    """True if path resolves to a file under trainer/images/<taxon>/."""
+    if not image_path_under_images_root(image_path):
+        return False
+    full = (IMAGES_DIR / image_path).resolve()
+    project_root = (IMAGES_DIR / taxon).resolve()
+    try:
+        full.relative_to(project_root)
+    except ValueError:
+        return False
+    return full.is_file()

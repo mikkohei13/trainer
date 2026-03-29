@@ -46,6 +46,8 @@ def annotate(taxon: str):
             next_url=None,
             current_num=0,
             total=0,
+            show_detect=False,
+            detect_api_url="",
         )
 
     image_path = request.args.get("path", "")
@@ -70,6 +72,13 @@ def annotate(taxon: str):
 
     annotations = db.get_annotations(image_path)
 
+    is_unannotated = (
+        not annotations["no_organism"] and len(annotations["boxes"]) == 0
+    )
+    has_active_model = db.get_active_model_path_for_taxon(taxon) is not None
+    show_detect = is_unannotated and has_active_model
+    detect_api_url = url_for("api.detect", taxon=taxon)
+
     return render_template(
         "annotate.html",
         project=project,
@@ -79,4 +88,6 @@ def annotate(taxon: str):
         next_url=next_url,
         current_num=idx + 1,
         total=len(paths),
+        show_detect=show_detect,
+        detect_api_url=detect_api_url,
     )

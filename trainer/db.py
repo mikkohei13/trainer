@@ -15,11 +15,13 @@ def init_db() -> None:
     with get_connection() as con:
         con.execute("""
             CREATE TABLE IF NOT EXISTS project (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                taxon   TEXT NOT NULL UNIQUE,
-                created TEXT NOT NULL
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                taxon                   TEXT NOT NULL UNIQUE,
+                created                 TEXT NOT NULL,
+                active_training_run_id  INTEGER
             )
         """)
+        _migrate_project_active_training_run(con)
         con.execute("""
             CREATE TABLE IF NOT EXISTS bounding_box (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,6 +51,15 @@ def init_db() -> None:
                 log_path     TEXT
             )
         """)
+
+
+def _migrate_project_active_training_run(con: sqlite3.Connection) -> None:
+    cur = con.execute("PRAGMA table_info(project)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "active_training_run_id" not in columns:
+        con.execute(
+            "ALTER TABLE project ADD COLUMN active_training_run_id INTEGER"
+        )
 
 
 def get_projects() -> list[sqlite3.Row]:
@@ -187,6 +198,69 @@ def get_training_runs(project_id: int) -> list[sqlite3.Row]:
             "SELECT * FROM training_run WHERE project_id = ? ORDER BY id DESC",
             (project_id,),
         ).fetchall()
+
+
+def get_training_run(run_id: int) -> sqlite3.Row | None:
+    with get_connection() as con:
+        return con.execute(
+            "SELECT * FROM training_run WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+
+
+def set_active_training_run(taxon: str, run_id: int | None) -> None:
+    project = get_project(taxon)
+    if project is None:
+        raise ValueError("unknown project")
+
+    if run_id is None:
+        with get_connection() as con:
+            con.execute(
+                "UPDATE project SET active_training_run_id = NULL WHERE id = ?",
+                (project["id"],),
+            )
+        return
+
+    run = get_training_run(run_id)
+    if run is None:
+        raise ValueError("unknown training run")
+    if run["project_id"] != project["id"]:
+        raise ValueError("training run belongs to another project")
+    if run["status"] != "done":
+        raise ValueError("training run is not finished")
+    if not run["model_path"]:
+        raise ValueError("training run has no model file")
+
+    with get_connection() as con:
+        con.execute(
+            "UPDATE project SET active_training_run_id = ? WHERE id = ?",
+            (run_id, project["id"]),
+        )
+
+
+def get_active_model_path_for_taxon(taxon: str) -> Path | None:
+    """
+    If the project has an active training run with status done and the weights
+    file exists on disk, return that path. Otherwise None.
+    """
+    project = get_project(taxon)
+    if project is None:
+        return None
+    active_id = project["active_training_run_id"]
+    if active_id is None:
+        return None
+    run = get_training_run(int(active_id))
+    if run is None:
+        return None
+    if run["status"] != "done":
+        return None
+    mp = run["model_path"]
+    if not mp:
+        return None
+    path = Path(mp)
+    if not path.is_file():
+        return None
+    return path
 
 
 def fail_stale_training_runs() -> None:

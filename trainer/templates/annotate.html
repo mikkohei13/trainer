@@ -21,6 +21,9 @@
   </form>
   <button type="button" id="btn-next" {% if not next_url %}disabled{% endif %}>Next →</button>
   <span class="spacer"></span>
+  {% if show_detect %}
+  <button type="button" id="btn-detect">Detect</button>
+  {% endif %}
   <button type="button" id="btn-save">Save</button>
   <button type="button" class="secondary" id="btn-no-organism">No organisms</button>
   <button type="button" class="danger" id="btn-clear">Clear</button>
@@ -43,6 +46,8 @@
   const initialAnnotations = {{ annotations | tojson }};
   const prevUrl = {{ prev_url | tojson }};
   const nextUrl = {{ next_url | tojson }};
+  const detectApiUrl = {{ detect_api_url | tojson }};
+  const showDetect = {{ show_detect | tojson }};
 
   const imageWrapEl = document.getElementById("image-wrap");
   const statusEl = document.getElementById("annotate-status");
@@ -248,6 +253,51 @@
     const url = this.action + "?i=" + i;
     navigateTo(url);
   });
+
+  if (showDetect && detectApiUrl) {
+    document.getElementById("btn-detect").addEventListener("click", async function () {
+      if (!anno) {
+        return;
+      }
+      setStatus("Detecting…", false);
+      let res;
+      try {
+        res = await fetch(detectApiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image_path: imagePath }),
+        });
+      } catch (err) {
+        setStatus("Detect failed", true);
+        return;
+      }
+      if (!res.ok) {
+        setStatus("Detect failed", true);
+        return;
+      }
+      const data = await res.json();
+      const boxes = data.boxes;
+      if (!boxes || !boxes.length) {
+        setStatus("No detection.", false);
+        return;
+      }
+      skipDirtyEvents = true;
+      for (let i = 0; i < boxes.length; i++) {
+        const b = boxes[i];
+        const annoId = crypto.randomUUID();
+        anno.addAnnotation(annotationFromBox({
+          anno_id: annoId,
+          x: b.x,
+          y: b.y,
+          w: b.w,
+          h: b.h,
+        }));
+      }
+      skipDirtyEvents = false;
+      markDirty();
+      setStatus("Detection added (unsaved).", true);
+    });
+  }
 })();
 </script>
 

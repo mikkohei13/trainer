@@ -1,7 +1,13 @@
 from flask import Blueprint, abort, jsonify, request
 
 from trainer import db
-from trainer.images import image_path_under_images_root, list_project_image_paths
+from trainer import inference
+from trainer.images import (
+    IMAGES_DIR,
+    image_path_under_images_root,
+    image_path_under_taxon_project,
+    list_project_image_paths,
+)
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -57,3 +63,27 @@ def post_annotations(image_path: str):
         abort(400)
     db.save_annotations(image_path, normalized_boxes, no_organism)
     return jsonify({"ok": True})
+
+
+@bp.post("/projects/<taxon>/detect")
+def detect(taxon: str):
+    if db.get_project(taxon) is None:
+        return jsonify({"error": "unknown project"}), 404
+
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return jsonify({"error": "invalid JSON"}), 400
+    image_path = payload.get("image_path")
+    if not isinstance(image_path, str) or not image_path:
+        return jsonify({"error": "missing image_path"}), 400
+
+    if not image_path_under_taxon_project(image_path, taxon):
+        return jsonify({"error": "invalid image path"}), 400
+
+    model_path = db.get_active_model_path_for_taxon(taxon)
+    if model_path is None:
+        return jsonify({"error": "no active model"}), 400
+
+    abs_image = IMAGES_DIR / image_path
+    boxes = inference.predict_top_box(model_path, abs_image)
+    return jsonify({"boxes": boxes})
