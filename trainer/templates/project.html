@@ -4,7 +4,10 @@
 {% block content %}
 {% set ann = stats.annotation %}
 <h1>{{ project.taxon }}</h1>
-<p class="project-actions"><a class="btn-link" href="{{ url_for('annotate.annotate', taxon=project.taxon) }}">Annotate images</a></p>
+<p class="project-actions">
+  <a class="btn-link" href="{{ url_for('annotate.annotate', taxon=project.taxon) }}">Annotate images</a>
+  <a class="btn-link" href="{{ url_for('projects.evaluate_models', taxon=project.taxon) }}">Evaluate models</a>
+</p>
 
 <section class="card annotation-overview" aria-labelledby="anno-heading">
   <h2 id="anno-heading">Annotation progress</h2>
@@ -56,6 +59,46 @@
         <td class="num">{{ row.count }}</td>
       </tr>
       {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="card" aria-labelledby="quality-heading">
+  <h2 id="quality-heading">Quality rating</h2>
+  {% set q = quality_stats %}
+  {% set q_total = q.unrated + q.rated %}
+  {% if q_total == 0 %}
+  <p class="empty">No images with bounding boxes yet.</p>
+  {% else %}
+  <table class="anno-table">
+    <thead>
+      <tr>
+        <th scope="col">Status</th>
+        <th scope="col" class="num">Images</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="row-not-done">
+        <td>
+          {% if q.unrated > 0 %}
+          <a href="{{ url_for('projects.quality_gallery', taxon=project.taxon, bucket='unrated') }}">Unrated</a>
+          {% else %}
+          Unrated
+          {% endif %}
+        </td>
+        <td class="num">{{ q.unrated }}</td>
+      </tr>
+      <tr>
+        <td>
+          {% if q.rated > 0 %}
+          <a href="{{ url_for('projects.quality_gallery', taxon=project.taxon, bucket='rated') }}">Rated</a>
+          {% else %}
+          Rated
+          {% endif %}
+        </td>
+        <td class="num">{{ q.rated }}</td>
+      </tr>
     </tbody>
   </table>
   {% endif %}
@@ -114,6 +157,60 @@
   </form>
   {% else %}
   <p class="empty">No training runs yet.</p>
+  {% endif %}
+</section>
+
+<section class="card" aria-labelledby="quality-models-heading">
+  <h2 id="quality-models-heading">Quality model</h2>
+  <form method="post" action="{{ url_for('models.start_quality_training', taxon=project.taxon) }}" style="margin-bottom: 1rem;">
+    <button type="submit">Start quality model training</button>
+  </form>
+  {% if quality_training_runs %}
+  <form method="post" action="{{ url_for('models.set_active_quality_model', taxon=project.taxon) }}">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Run</th>
+          <th scope="col">Started</th>
+          <th scope="col">Finished</th>
+          <th scope="col">Status</th>
+          <th scope="col" class="num">Val RMSE</th>
+          <th scope="col">Active</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td colspan="5">None (no quality model)</td>
+          <td>
+            <label>
+              <input type="radio" name="run_id" value="" {% if not project['active_quality_run_id'] %}checked{% endif %}>
+            </label>
+          </td>
+        </tr>
+        {% for run in quality_training_runs %}
+        <tr>
+          <td>{{ run.id }}</td>
+          <td>{{ run.started_at[:19] }}</td>
+          <td>{{ run.finished_at[:19] if run.finished_at else "—" }}</td>
+          <td>{{ run.status }}</td>
+          <td class="num">{{ run.val_rmse | round(4) if run.val_rmse is not none else "—" }}</td>
+          <td>
+            {% if run.status == 'done' and run.model_path %}
+            <label>
+              <input type="radio" name="run_id" value="{{ run.id }}" {% if project['active_quality_run_id'] == run.id %}checked{% endif %}>
+            </label>
+            {% else %}
+            —
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p><button type="submit">Set active quality model</button></p>
+  </form>
+  {% else %}
+  <p class="empty">No quality training runs yet.</p>
   {% endif %}
 </section>
 

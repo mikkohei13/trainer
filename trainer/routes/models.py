@@ -2,7 +2,7 @@
 
 from flask import Blueprint, redirect, request, url_for
 
-from trainer import db, training
+from trainer import db, quality_training, training
 
 bp = Blueprint("models", __name__)
 
@@ -42,5 +42,44 @@ def start_training(taxon: str):
 
     run_id = db.create_training_run(project["id"])
     training.start_training_process(run_id, taxon)
+
+    return redirect(url_for("projects.project_detail", taxon=taxon))
+
+
+@bp.post("/projects/<taxon>/active-quality-model")
+def set_active_quality_model(taxon: str):
+    project = db.get_project(taxon)
+    if project is None:
+        return redirect(url_for("projects.index"))
+
+    raw = request.form.get("run_id", "").strip()
+    if raw == "":
+        try:
+            db.set_active_quality_run(taxon, None)
+        except ValueError:
+            pass
+        return redirect(url_for("projects.project_detail", taxon=taxon))
+
+    try:
+        run_id = int(raw)
+    except ValueError:
+        return redirect(url_for("projects.project_detail", taxon=taxon))
+
+    try:
+        db.set_active_quality_run(taxon, run_id)
+    except ValueError:
+        pass
+
+    return redirect(url_for("projects.project_detail", taxon=taxon))
+
+
+@bp.post("/projects/<taxon>/quality-train")
+def start_quality_training(taxon: str):
+    project = db.get_project(taxon)
+    if project is None:
+        return redirect(url_for("projects.index"))
+
+    run_id = db.create_quality_training_run(project["id"])
+    quality_training.start_quality_training_process(run_id, taxon)
 
     return redirect(url_for("projects.project_detail", taxon=taxon))

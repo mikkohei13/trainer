@@ -18,6 +18,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     db.init_db()
     db.fail_stale_training_runs()
+    db.fail_stale_quality_training_runs()
     app.register_blueprint(projects.bp)
     app.register_blueprint(annotate.bp)
     app.register_blueprint(api.bp)
@@ -26,4 +27,11 @@ def create_app() -> Flask:
 
 
 app = create_app()
+
+
+
+
+
+
+
 

@@ -24,9 +24,9 @@ from trainer.images import IMAGES_DIR
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 
 BASE_MODEL = "yolo11m.pt" # XL: x, L: l, M: m
-TRAIN_EPOCHS = 50
+TRAIN_EPOCHS = 100
 FREEZE_LAYERS = 10
-LR0 = 0.001
+LR0 = 0.0008
 PATIENCE = 20
 
 
@@ -70,6 +70,9 @@ def _blocking_train(run_id: int, taxon: str) -> None:
                 freeze=FREEZE_LAYERS,
                 lr0=LR0,
                 patience=PATIENCE,
+#                degrees=15,
+#                scale=0.5,
+#                fliplr=0.5,
                 verbose=True,
                 project=str(run_dir.parent),
                 name=str(run_id),

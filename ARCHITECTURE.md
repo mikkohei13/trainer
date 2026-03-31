@@ -16,16 +16,3 @@
 
 - **Scripts (`scripts/`):** CLI utilities (e.g. FinBIF fetch) run outside Flask; repo-root `secrets.py` holds API keys. Not part of the web process.
 
-## Development principles
-
-- Keep it simple and clear.
-- This is one-person app, so avoid premature optimization.
-- You can expect necessary data exists, so no need for complex fallback or error messaging logic.
-- Add unit tests to ./tests for the most important features.
-- Avoid ternary operators and other shorthands, instead use clear if/else statements.
-- Avoid unnecessary complexity:
-  - No accessibility features
-  - No authentication
-  - Desktop-optimized UI, no mobile support
-  - No heavy JavaScript frameworks
-- Favor creating app/business logic in Python backend over JavaScript frontend. This is a backend app, with JavaScript only used to improve the UI, not to drive the app itself.

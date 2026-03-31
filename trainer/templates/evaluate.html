@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% block title %}Evaluate models — {{ project.taxon }} — Trainer{% endblock %}
+
+{% block extra_head %}
+<style>
+  .eval-toolbar {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    margin: 0 0 1rem;
+  }
+
+  .eval-grid {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 1rem;
+  }
+
+  .eval-item {
+    background: #fff;
+    border-radius: 6px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    padding: 0.75rem;
+  }
+
+  .eval-image-wrap {
+    position: relative;
+    border-radius: 4px;
+    overflow: hidden;
+    background: #f3f4f6;
+  }
+
+  .eval-image-wrap img {
+    display: block;
+    width: 100%;
+    height: 260px;
+    object-fit: contain;
+    object-position: center;
+  }
+
+  .eval-overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .eval-status {
+    margin: 0.5rem 0 0;
+    color: #555;
+    font-size: 0.9rem;
+  }
+
+  .score-badge {
+    display: inline-block;
+    font-weight: 600;
+    border-radius: 999px;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.85rem;
+  }
+
+  .score-high { background: #dcfce7; color: #166534; }
+  .score-mid { background: #fef3c7; color: #92400e; }
+  .score-low { background: #fee2e2; color: #991b1b; }
+</style>
+{% endblock %}
+
+{% block content %}
+<nav class="crumbs" aria-label="Breadcrumb">
+  <a href="{{ url_for('projects.index') }}">Projects</a>
+  <span class="crumb-sep">/</span>
+  <a href="{{ url_for('projects.project_detail', taxon=project.taxon) }}">{{ project.taxon }}</a>
+  <span class="crumb-sep">/</span>
+  <span>Evaluate models</span>
+</nav>
+
+<h1>Evaluate models</h1>
+
+{% if not has_detection_model or not has_quality_model %}
+<p class="empty">
+  {% if not has_detection_model and not has_quality_model %}
+  Active detection model and active quality model are required.
+  {% elif not has_detection_model %}
+  Active detection model is required.
+  {% else %}
+  Active quality model is required.
+  {% endif %}
+</p>
+{% endif %}
+
+<form method="get" class="eval-toolbar">
+  <input type="hidden" name="taxon" value="{{ project.taxon }}">
+  <label for="n">Number of images</label>
+  <select id="n" name="n">
+    {% for opt in [10, 20, 50] %}
+    <option value="{{ opt }}" {% if requested_n == opt %}selected{% endif %}>{{ opt }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Load</button>
+  <span class="gallery-meta">Available unannotated images: {{ available_count }}</span>
+</form>
+
+{% if image_paths %}
+<ul class="eval-grid" id="eval-grid">
+  {% for p in image_paths %}
+  <li class="eval-item" data-image-path="{{ p }}">
+    <div class="eval-image-wrap">
+      <a href="{{ url_for('annotate.annotate', taxon=project.taxon, path=p) }}">
+        <img src="{{ url_for('annotate.serve_image', filename=p) }}" alt="" loading="lazy">
+      </a>
+      <svg class="eval-overlay" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+    </div>
+    <p class="eval-status">Loading prediction…</p>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No unannotated images available.</p>
+{% endif %}
+
+<p class="gallery-footer"><a href="{{ url_for('projects.project_detail', taxon=project.taxon) }}">← Back to project</a></p>
+
+<script>
+  (() => {
+    const hasDetectionModel = {{ "true" if has_detection_model else "false" }};
+    const hasQualityModel = {{ "true" if has_quality_model else "false" }};
+    if (!hasDetectionModel || !hasQualityModel) return;
+
+    const endpoint = "{{ url_for('api.evaluate_image', taxon=project.taxon) }}";
+    const items = Array.from(document.querySelectorAll(".eval-item"));
+
+    function scoreClass(score) {
+      if (score >= 0.8) return "score-high";
+      if (score >= 0.5) return "score-mid";
+      return "score-low";
+    }
+
+    function waitForImageReady(img) {
+      if (img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve, reject) => {
+        const onLoad = () => {
+          cleanup();
+          resolve();
+        };
+        const onError = () => {
+          cleanup();
+          reject(new Error("image failed to load"));
+        };
+        const cleanup = () => {
+          img.removeEventListener("load", onLoad);
+          img.removeEventListener("error", onError);
+        };
+        img.addEventListener("load", onLoad);
+        img.addEventListener("error", onError);
+      });
+    }
+
+    async function processItem(item) {
+      const imagePath = item.dataset.imagePath;
+      const statusEl = item.querySelector(".eval-status");
+      const overlay = item.querySelector(".eval-overlay");
+      const img = item.querySelector("img");
+
+      try {
+        await waitForImageReady(img);
+
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image_path: imagePath }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          statusEl.textContent = data.error || "Prediction failed";
+          return;
+        }
+
+        if (!data.box) {
+          statusEl.textContent = "No detection";
+          return;
+        }
+
+        const renderW = img.clientWidth;
+        const renderH = img.clientHeight;
+        const natW = img.naturalWidth;
+        const natH = img.naturalHeight;
+        const scale = Math.min(renderW / natW, renderH / natH);
+        const drawnW = natW * scale;
+        const drawnH = natH * scale;
+        const offsetX = (renderW - drawnW) / 2;
+        const offsetY = (renderH - drawnH) / 2;
+
+        const x = offsetX + (data.box.x / data.img_w) * drawnW;
+        const y = offsetY + (data.box.y / data.img_h) * drawnH;
+        const w = (data.box.w / data.img_w) * drawnW;
+        const h = (data.box.h / data.img_h) * drawnH;
+
+        overlay.setAttribute("viewBox", `0 0 ${renderW} ${renderH}`);
+        overlay.innerHTML = `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="none" stroke="#22c55e" stroke-width="2"></rect>`;
+
+        const score = Number(data.quality_score);
+        const badgeCls = scoreClass(score);
+        statusEl.innerHTML = `Quality score: <span class="score-badge ${badgeCls}">${score.toFixed(3)}</span>`;
+      } catch (_) {
+        statusEl.textContent = "Prediction failed";
+      }
+    }
+
+    (async () => {
+      for (const item of items) {
+        await processItem(item);
+      }
+    })();
+  })();
+</script>
+{% endblock %}
