@@ -33,6 +33,13 @@ def _quality_bucket_label(bucket_key: str) -> str:
     raise ValueError("invalid quality bucket")
 
 
+def _parse_identification_rank(raw: str | None) -> str | None:
+    rank = (raw or "").strip().lower()
+    if rank in db.IDENTIFICATION_RANKS:
+        return rank
+    return None
+
+
 @bp.get("/")
 def index():
     projects = db.get_projects()
@@ -46,10 +53,27 @@ def create_project():
         return redirect(url_for("projects.index"))
     project_dir = IMAGES_DIR / taxon
     project_dir.mkdir(parents=True, exist_ok=True)
+    rank = _parse_identification_rank(request.form.get("identification_rank"))
+    if rank is None:
+        rank = db.DEFAULT_IDENTIFICATION_RANK
     try:
-        db.create_project(taxon)
+        db.create_project(taxon, rank)
     except Exception:
         pass  # already exists — silently ignore
+    return redirect(url_for("projects.project_detail", taxon=taxon))
+
+
+@bp.post("/projects/<taxon>/identification-rank")
+def set_identification_rank(taxon: str):
+    project = db.get_project(taxon)
+    if project is None:
+        return redirect(url_for("projects.index"))
+    rank = _parse_identification_rank(request.form.get("identification_rank"))
+    if rank is not None:
+        try:
+            db.set_identification_rank(taxon, rank)
+        except ValueError:
+            pass
     return redirect(url_for("projects.project_detail", taxon=taxon))
 
 
@@ -58,7 +82,7 @@ def project_detail(taxon: str):
     project = db.get_project(taxon)
     if project is None:
         return redirect(url_for("projects.index"))
-    stats = project_stats(taxon)
+    stats = project_stats(taxon, project["identification_rank"])
     _, box_map = db.project_annotation_state(taxon)
     quality_map = db.get_image_quality_map(taxon)
     with_boxes = {p for p, n in box_map.items() if n >= 1}

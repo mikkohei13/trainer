@@ -76,11 +76,15 @@ form.inline {
   align-items: center;
 }
 
-input[type="text"] {
+input[type="text"],
+select {
   padding: 0.45rem 0.7rem;
   border: 1px solid #ccc;
   border-radius: 4px;
   font-size: 0.95rem;
+}
+
+input[type="text"] {
   width: 220px;
 }
 

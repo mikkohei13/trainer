@@ -16,6 +16,12 @@
       autocomplete="off"
       id="taxon-input"
     >
+    <label for="rank-input">Identification rank</label>
+    <select name="identification_rank" id="rank-input">
+      <option value="species" selected>Species</option>
+      <option value="genus">Genus</option>
+      <option value="family">Family</option>
+    </select>
     <button type="submit">Create project</button>
   </form>
 </div>
@@ -25,6 +31,7 @@
   <thead>
     <tr>
       <th>Taxon</th>
+      <th>Identification rank</th>
       <th>Created</th>
     </tr>
   </thead>
@@ -32,6 +39,7 @@
     {% for p in projects %}
     <tr>
       <td><a href="/projects/{{ p.taxon }}">{{ p.taxon }}</a></td>
+      <td>{{ p.identification_rank|capitalize }}</td>
       <td>{{ p.created[:10] }}</td>
     </tr>
     {% endfor %}

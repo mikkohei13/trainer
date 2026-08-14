@@ -9,6 +9,21 @@
   <a class="btn-link" href="{{ url_for('projects.evaluate_models', taxon=project.taxon) }}">Evaluate models</a>
 </p>
 
+<section class="card" aria-labelledby="rank-heading">
+  <h2 id="rank-heading">Identification rank</h2>
+  <p>Rank the identification model will predict.</p>
+  <form class="inline" method="post" action="{{ url_for('projects.set_identification_rank', taxon=project.taxon) }}">
+    {% for rank in ("species", "genus", "family") %}
+    <label>
+      <input type="radio" name="identification_rank" value="{{ rank }}"
+        {% if project['identification_rank'] == rank %}checked{% endif %}>
+      {{ rank|capitalize }}
+    </label>
+    {% endfor %}
+    <button type="submit">Save</button>
+  </form>
+</section>
+
 <section class="card annotation-overview" aria-labelledby="anno-heading">
   <h2 id="anno-heading">Annotation progress</h2>
   {% if ann.total_images == 0 %}
@@ -238,7 +253,9 @@
 {% endif %}
 
 <h2>Images per taxon</h2>
-{% if stats.taxa %}
+{% if project['identification_rank'] == 'family' %}
+<p>Family-level training not implemented yet</p>
+{% elif stats.taxa %}
 <table>
   <thead>
     <tr>

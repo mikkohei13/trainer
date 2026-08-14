@@ -4,6 +4,9 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "trainer.db"
 
+IDENTIFICATION_RANKS = ("species", "genus", "family")
+DEFAULT_IDENTIFICATION_RANK = "species"
+
 
 def get_connection() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
@@ -18,11 +21,13 @@ def init_db() -> None:
                 id                      INTEGER PRIMARY KEY AUTOINCREMENT,
                 taxon                   TEXT NOT NULL UNIQUE,
                 created                 TEXT NOT NULL,
-                active_training_run_id  INTEGER
+                active_training_run_id  INTEGER,
+                identification_rank     TEXT NOT NULL DEFAULT 'species'
             )
         """)
         _migrate_project_active_training_run(con)
         _migrate_project_active_quality_run(con)
+        _migrate_project_identification_rank(con)
         con.execute("""
             CREATE TABLE IF NOT EXISTS bounding_box (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,6 +96,15 @@ def _migrate_project_active_quality_run(con: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_project_identification_rank(con: sqlite3.Connection) -> None:
+    cur = con.execute("PRAGMA table_info(project)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "identification_rank" not in columns:
+        con.execute(
+            "ALTER TABLE project ADD COLUMN identification_rank TEXT NOT NULL DEFAULT 'species'"
+        )
+
+
 def _migrate_image_quality(con: sqlite3.Connection) -> None:
     cur = con.execute("PRAGMA table_info(image_quality)")
     columns = {row[1] for row in cur.fetchall()}
@@ -110,12 +124,30 @@ def get_project(taxon: str) -> sqlite3.Row | None:
         ).fetchone()
 
 
-def create_project(taxon: str) -> None:
+def create_project(
+    taxon: str,
+    identification_rank: str = DEFAULT_IDENTIFICATION_RANK,
+) -> None:
+    if identification_rank not in IDENTIFICATION_RANKS:
+        raise ValueError("invalid identification rank")
     created = datetime.now(timezone.utc).isoformat()
     with get_connection() as con:
         con.execute(
-            "INSERT INTO project (taxon, created) VALUES (?, ?)",
-            (taxon, created),
+            "INSERT INTO project (taxon, created, identification_rank) VALUES (?, ?, ?)",
+            (taxon, created, identification_rank),
+        )
+
+
+def set_identification_rank(taxon: str, rank: str) -> None:
+    if rank not in IDENTIFICATION_RANKS:
+        raise ValueError("invalid identification rank")
+    project = get_project(taxon)
+    if project is None:
+        raise ValueError("unknown project")
+    with get_connection() as con:
+        con.execute(
+            "UPDATE project SET identification_rank = ? WHERE id = ?",
+            (rank, project["id"]),
         )
 
 

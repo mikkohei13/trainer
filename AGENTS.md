@@ -1,4 +1,7 @@
-See `ARCHITECTURE.md` for system architecture.
+See `ARCHITECTURE.md` for system architecture details.
+
+- Backend: Python 3.11+ run with uv, Flask, Jinja2, SQLite via `sqlite3`
+- Frontend: HTML, CSS, JavaScript without large frameworks
 
 ## Development principles
 
@@ -8,6 +11,12 @@ See `ARCHITECTURE.md` for system architecture.
 - Do not use heavy JavaScript frameworks.
 - When changing the database schema, do the required migration. Backward compatibility with old database schemas is not required.
 - Add unit tests in `./tests` for important behavior only.
+
+Run tests with:
+
+```bash
+uv run python -m unittest discover -s tests -v
+```
 
 ## Product constraints
 

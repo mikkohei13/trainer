@@ -4,7 +4,7 @@
 
 - **Web app (`trainer/app.py`):** Server-rendered pages. `GET /` lists projects; `POST /projects` creates a project (slug = taxon name); `GET /projects/<taxon>` shows per-collection and per-species-folder image counts from scanning `trainer/images/`.
 
-- **Data layout:** Project metadata is rows in `project(taxon, created)`. Training images live on disk under `trainer/images/<taxon>/<collection>/<species_folder>/` (e.g. `Genus_species/*.jpg`). The app counts files with image extensions; it does not embed pixels in the DB.
+- **Data layout:** Project metadata is rows in `project(taxon, created, identification_rank)`. `identification_rank` is `species`, `genus`, or `family` (the rank the identification model will predict; stored only, not used yet). Training images live on disk under `trainer/images/<taxon>/<collection>/<species_folder>/` (e.g. `Genus_species/*.jpg`). The app counts files with image extensions; it does not embed pixels in the DB.
 
 - **Annotation UI (`GET /annotate/<taxon>`):** Server renders `annotate.html` and injects the starting image index (from `?i=` query parameter) as a Jinja variable. The browser then drives everything with vanilla JS:
   - Fetches the full sorted image list from `GET /api/images/<taxon>`.

@@ -12,7 +12,7 @@ def count_images(path: Path) -> int:
     return sum(1 for f in path.rglob("*") if f.suffix.lower() in IMAGE_EXTS)
 
 
-def project_stats(taxon: str) -> dict:
+def project_stats(taxon: str, identification_rank: str = "species") -> dict:
     project_dir = IMAGES_DIR / taxon
     collections = []
     taxa_rows = []
@@ -40,8 +40,19 @@ def project_stats(taxon: str) -> dict:
                 else:
                     taxa_rows.append({"taxon": name, "count": count})
 
+    if identification_rank == "genus":
+        taxa_rows = _aggregate_taxa_by_genus(taxa_rows)
+
     anno = _project_annotation_distribution(taxon)
     return {"collections": collections, "taxa": taxa_rows, "annotation": anno}
+
+
+def _aggregate_taxa_by_genus(taxa_rows: list[dict]) -> list[dict]:
+    counts: dict[str, int] = {}
+    for row in taxa_rows:
+        genus = row["taxon"].split("_", 1)[0]
+        counts[genus] = counts.get(genus, 0) + row["count"]
+    return [{"taxon": name, "count": counts[name]} for name in sorted(counts)]
 
 
 def project_annotation_buckets(taxon: str) -> dict[str, list[str]]:
