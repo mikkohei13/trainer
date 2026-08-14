@@ -230,6 +230,41 @@
   {% endif %}
 </section>
 
+<section class="card" aria-labelledby="harmonize-heading">
+  <h2 id="harmonize-heading">Taxon name harmonization</h2>
+  <p>Map image folder names to FinBIF scientific names using taxa.json.</p>
+  <form method="post" action="{{ url_for('projects.harmonize_names', taxon=project.taxon) }}" style="margin-bottom: 1rem;">
+    <button type="submit">{% if harmonization_rows is not none %}Regenerate{% else %}Generate{% endif %} harmonization</button>
+  </form>
+  {% if harmonize_error == 'missing_taxa' %}
+  <p class="empty">Cannot generate: taxa.json not found for this project.</p>
+  {% endif %}
+  {% if harmonization_rows is not none %}
+  {% if harmonization_rows %}
+  <table class="anno-table">
+    <thead>
+      <tr>
+        <th scope="col">Image name</th>
+        <th scope="col">Authoritative name</th>
+        <th scope="col">Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in harmonization_rows %}
+      <tr>
+        <td>{{ row.image_name }}</td>
+        <td>{{ row.authoritative_name }}</td>
+        <td>{{ row.status }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Harmonization file is empty (no image folder names).</p>
+  {% endif %}
+  {% endif %}
+</section>
+
 <h2>Images per collection</h2>
 {% if stats.collections %}
 <table>

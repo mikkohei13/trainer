@@ -11,6 +11,19 @@ This is an application to manage the process of training ML image classification
 - Train a model to identify the insect species using a selection of the images
 - Evaluate the model performance
 
+## Setup
+
+Download taxon names from FinBIF with MX-code of the taxon, and place the taxon.json file into ./trainer/data/{project_name}/taxon.json:
+
+```bash
+curl -X 'GET' \
+'https://api.laji.fi/taxa/MX.289596/children?checklist=MR.1&selectedFields=id%2CscientificName%2CtypeOfOccurrenceInFinland%2CtaxonRank%2CobservationCountFinland%2Csynonyms%2CsynonymNames&checklistVersion=current&includeMedia=false&includeDescriptions=false&includeRedListEvaluations=false&includeHidden=false&sortOrder=taxonomic' \
+-H 'accept: application/json' \
+-H 'Authorization: Bearer TOKEN-HERE' \
+-H 'Accept-Language: fi' \
+-H 'API-Version: 1' > taxa.json
+```
+
 ## Run
 
 ```bash

@@ -2,6 +2,12 @@ from flask import Blueprint, abort, redirect, render_template, request, url_for
 import random
 
 from trainer import db
+from trainer.harmonize import (
+    TaxaJsonMissing,
+    generate_harmonization,
+    harmonization_path,
+    read_harmonization,
+)
 from trainer.images import (
     IMAGES_DIR,
     normalize_annotation_bucket,
@@ -92,6 +98,8 @@ def project_detail(taxon: str):
     }
     training_runs = db.get_training_runs(project["id"])
     quality_training_runs = db.get_quality_training_runs(project["id"])
+    harmonization_rows = read_harmonization(harmonization_path(taxon))
+    harmonize_error = request.args.get("harmonize_error")
     return render_template(
         "project.html",
         project=project,
@@ -99,7 +107,27 @@ def project_detail(taxon: str):
         quality_stats=quality_stats,
         training_runs=training_runs,
         quality_training_runs=quality_training_runs,
+        harmonization_rows=harmonization_rows,
+        harmonize_error=harmonize_error,
     )
+
+
+@bp.post("/projects/<taxon>/harmonize")
+def harmonize_names(taxon: str):
+    project = db.get_project(taxon)
+    if project is None:
+        return redirect(url_for("projects.index"))
+    try:
+        generate_harmonization(taxon)
+    except TaxaJsonMissing:
+        return redirect(
+            url_for(
+                "projects.project_detail",
+                taxon=taxon,
+                harmonize_error="missing_taxa",
+            )
+        )
+    return redirect(url_for("projects.project_detail", taxon=taxon))
 
 
 @bp.get("/projects/<taxon>/annotation-gallery")
