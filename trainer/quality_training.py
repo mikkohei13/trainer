@@ -40,6 +40,7 @@ def _blocking_quality_train(run_id: int, taxon: str) -> None:
     trainer_logger.addHandler(handler)
 
     trainer_logger.info("[quality run %s] starting for project '%s'", run_id, taxon)
+    print(f"[quality run {run_id}] starting for project '{taxon}'", flush=True)
 
     try:
         records = _collect_quality_records(taxon)
@@ -52,6 +53,10 @@ def _blocking_quality_train(run_id: int, taxon: str) -> None:
             run_id,
             len(train_records),
             len(val_records),
+        )
+        print(
+            f"[quality run {run_id}] dataset: train={len(train_records)}, val={len(val_records)} images",
+            flush=True,
         )
 
         import torch
@@ -90,6 +95,11 @@ def _blocking_quality_train(run_id: int, taxon: str) -> None:
         best_state = None
         stale_epochs = 0
 
+        print(
+            f"[quality run {run_id}] training started (epochs={QUALITY_TRAIN_EPOCHS}, patience={QUALITY_PATIENCE})",
+            flush=True,
+        )
+
         for epoch in range(1, QUALITY_TRAIN_EPOCHS + 1):
             model.train()
             train_loss_sum = 0.0
@@ -117,6 +127,10 @@ def _blocking_quality_train(run_id: int, taxon: str) -> None:
                 train_loss,
                 val_rmse,
             )
+            print(
+                f"[quality run {run_id}] epoch={epoch} train_mse={train_loss:.6f} val_rmse={val_rmse:.6f}",
+                flush=True,
+            )
 
             if best_rmse is None or val_rmse < best_rmse:
                 best_rmse = val_rmse
@@ -129,6 +143,10 @@ def _blocking_quality_train(run_id: int, taxon: str) -> None:
                         "[quality run %s] early stopping after %s stale epochs",
                         run_id,
                         stale_epochs,
+                    )
+                    print(
+                        f"[quality run {run_id}] early stopping after {stale_epochs} stale epochs",
+                        flush=True,
                     )
                     break
 
@@ -152,9 +170,14 @@ def _blocking_quality_train(run_id: int, taxon: str) -> None:
             best_rmse,
             best_path,
         )
+        print(
+            f"[quality run {run_id}] done — val_rmse={best_rmse}, model={best_path}",
+            flush=True,
+        )
         db.finish_quality_training_run(run_id, str(best_path), float(best_rmse), str(log_path))
     except Exception as exc:
         trainer_logger.exception("[quality run %s] failed: %s", run_id, exc)
+        print(f"[quality run {run_id}] failed: {exc}", flush=True)
         db.fail_quality_training_run(run_id, str(log_path))
     finally:
         handler.close()
