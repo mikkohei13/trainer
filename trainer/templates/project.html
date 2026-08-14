@@ -105,7 +105,8 @@
 </section>
 
 <section class="card" aria-labelledby="models-heading">
-  <h2 id="models-heading">Models</h2>
+  <h2 id="models-heading">Object Detection Models</h2>
+  <p>Note: training takes hours to complete.</p>
   <form method="post" action="{{ url_for('models.start_training', taxon=project.taxon) }}" style="margin-bottom: 1rem;">
     <button type="submit">Start training</button>
   </form>
@@ -161,7 +162,7 @@
 </section>
 
 <section class="card" aria-labelledby="quality-models-heading">
-  <h2 id="quality-models-heading">Quality model</h2>
+  <h2 id="quality-models-heading">Quality Models</h2>
   <form method="post" action="{{ url_for('models.start_quality_training', taxon=project.taxon) }}" style="margin-bottom: 1rem;">
     <button type="submit">Start quality model training</button>
   </form>
