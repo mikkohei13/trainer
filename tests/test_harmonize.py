@@ -17,6 +17,7 @@ def _taxon(
     scientific_name: str,
     rank: str = "MX.species",
     synonym_names: list[str] | None = None,
+    observation_count: int | None = None,
 ) -> dict:
     item = {
         "scientificName": scientific_name,
@@ -28,6 +29,8 @@ def _taxon(
             {"scientificName": name, "taxonRank": "MX.species"}
             for name in synonym_names
         ]
+    if observation_count is not None:
+        item["observationCountFinland"] = observation_count
     return item
 
 
@@ -76,22 +79,27 @@ class TestMatchImageName(unittest.TestCase):
             {
                 "scientific_name": "Cicadella viridis",
                 "synonyms": ["Tettigella viridis"],
+                "observation_count_finland": "1472",
             },
             {
                 "scientific_name": "Javesella pellucida",
                 "synonyms": ["Javesella marginata"],
+                "observation_count_finland": "1341",
             },
             {
                 "scientific_name": "Jassargus flori",
                 "synonyms": ["Jassargus pseudocellaris", "Jassargus falleni"],
+                "observation_count_finland": "791",
             },
             {
                 "scientific_name": "Jassargus allobrogicus",
                 "synonyms": ["Jassargus pseudocellaris", "Jassargus falleni"],
+                "observation_count_finland": "382",
             },
             {
                 "scientific_name": "Eurysula lurida",
                 "synonyms": ["Eurysula laevifrons"],
+                "observation_count_finland": "77",
             },
         ]
 
@@ -99,11 +107,13 @@ class TestMatchImageName(unittest.TestCase):
         row = harmonize.match_image_name("cicadella_VIRIDIS", self.taxa)
         self.assertEqual(row["authoritative_name"], "Cicadella viridis")
         self.assertEqual(row["status"], "")
+        self.assertEqual(row["observation_count_finland"], "1472")
 
     def test_synonym_exact_match(self):
         row = harmonize.match_image_name("Eurysula_laevifrons", self.taxa)
         self.assertEqual(row["authoritative_name"], "Eurysula lurida")
         self.assertEqual(row["status"], "")
+        self.assertEqual(row["observation_count_finland"], "77")
 
     def test_synonym_is_not_substring(self):
         row = harmonize.match_image_name("Tettigella", self.taxa)
@@ -128,11 +138,13 @@ class TestMatchImageName(unittest.TestCase):
         row = harmonize.match_image_name("Unknown_species", self.taxa)
         self.assertEqual(row["authoritative_name"], "")
         self.assertEqual(row["status"], "unknown")
+        self.assertEqual(row["observation_count_finland"], "")
 
     def test_multiple_synonym_hits(self):
         row = harmonize.match_image_name("Jassargus_pseudocellaris", self.taxa)
         self.assertEqual(row["authoritative_name"], "")
         self.assertEqual(row["status"], "multiple")
+        self.assertEqual(row["observation_count_finland"], "")
 
 
 class TestGenerateHarmonization(unittest.TestCase):
@@ -166,14 +178,16 @@ class TestGenerateHarmonization(unittest.TestCase):
         _write_taxa_json(
             harmonize.DATA_DIR / "bugs" / "taxa.json",
             [
-                _taxon("Cixiidae", "MX.family", ["Unknown_bug"]),
+                _taxon("Cixiidae", "MX.family", ["Unknown_bug"], observation_count=99),
                 _taxon(
                     "Cicadella viridis",
                     synonym_names=["Tettigella viridis"],
+                    observation_count=1472,
                 ),
                 _taxon(
                     "Eurysula lurida",
                     synonym_names=["Eurysula laevifrons"],
+                    observation_count=77,
                 ),
                 _taxon(
                     "Jassargus flori",
@@ -210,14 +224,23 @@ class TestGenerateHarmonization(unittest.TestCase):
             "Cicadella viridis",
         )
         self.assertEqual(by_name["Cicadella_viridis"]["status"], "")
+        self.assertEqual(by_name["Cicadella_viridis"]["observation_count_finland"], "1472")
+        self.assertEqual(by_name["Cicadella_viridis"]["image_count"], "2")
         self.assertEqual(
             by_name["Eurysula_laevifrons"]["authoritative_name"],
             "Eurysula lurida",
         )
+        self.assertEqual(by_name["Eurysula_laevifrons"]["observation_count_finland"], "77")
+        self.assertEqual(by_name["Eurysula_laevifrons"]["image_count"], "1")
         self.assertEqual(by_name["Unknown_bug"]["status"], "unknown")
         self.assertEqual(by_name["Unknown_bug"]["authoritative_name"], "")
+        self.assertEqual(by_name["Unknown_bug"]["observation_count_finland"], "")
+        self.assertEqual(by_name["Unknown_bug"]["image_count"], "1")
         self.assertEqual(
             by_name["Jassargus_pseudocellaris"]["status"], "multiple"
+        )
+        self.assertEqual(
+            by_name["Jassargus_pseudocellaris"]["observation_count_finland"], ""
         )
 
     def test_overwrite_on_regenerate(self):
@@ -236,7 +259,10 @@ class TestGenerateHarmonization(unittest.TestCase):
     def test_tsv_header(self):
         out = harmonize.generate_harmonization("bugs")
         header = out.read_text(encoding="utf-8").splitlines()[0]
-        self.assertEqual(header, "image_name\tauthoritative_name\tstatus")
+        self.assertEqual(
+            header,
+            "image_name\tauthoritative_name\tstatus\tobservation_count_finland\timage_count",
+        )
 
 
 class TestReadHarmonization(unittest.TestCase):

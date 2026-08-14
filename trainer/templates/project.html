@@ -247,6 +247,8 @@
         <th scope="col">Image name</th>
         <th scope="col">Authoritative name</th>
         <th scope="col">Status</th>
+        <th scope="col" class="num">Finland observations</th>
+        <th scope="col" class="num">Images</th>
       </tr>
     </thead>
     <tbody>
@@ -255,6 +257,8 @@
         <td>{{ row.image_name }}</td>
         <td>{{ row.authoritative_name }}</td>
         <td>{{ row.status }}</td>
+        <td class="num">{{ row.observation_count_finland }}</td>
+        <td class="num">{{ row.image_count }}</td>
       </tr>
       {% endfor %}
     </tbody>
