@@ -2,6 +2,7 @@
 **/secret/**
 **/images/**
 **/models/**
+**/data/**
 
 .env
 trainer_secrets.py

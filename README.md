@@ -13,10 +13,10 @@ This is an application to manage the process of training ML image classification
 
 ```bash
 uv sync
-uv run flask --app trainer.app run --reload
+uv run flask --app trainer.app run --reload --port 5001
 ```
 
-Open http://127.0.0.1:5000/ in a browser.
+Open http://127.0.0.1:5001/ in a browser.
 
 ## System architecture
 

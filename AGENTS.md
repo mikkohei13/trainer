@@ -1,14 +1,19 @@
-See ARCHITECTURE.md for the system architecture.
+See `ARCHITECTURE.md` for system architecture.
 
 ## Development principles
 
-- Keep it simple and clear.
-- No need for complex fallback or error messaging logic.
-- If you cnage database structure, do necessary migrations. But there is no need for backwards compatibility for old database schemas.
-- Add unit tests to ./tests for the most important features only.
--  This is one-person app, so avoid premature optimization and unnecessary complexity:
-  - No accessibility features
-  - No authentication
-  - Desktop-optimized UI, no mobile support
-  - No heavy JavaScript frameworks
-- Favor creating app/business logic in Python backend over JavaScript frontend. This is a backend app, with JavaScript only used to improve the UI, not to drive the app itself.
+- Prefer simple, clear solutions. Avoid unnecessary abstractions, fallbacks, and defensive complexity.
+- Keep changes focused on the requested task. Do not add unrelated features or infrastructure.
+- Put application and business logic in the Python backend. Use JavaScript only for UI enhancements; do not move core application logic to the frontend.
+- Do not use heavy JavaScript frameworks.
+- When changing the database schema, do the required migration. Backward compatibility with old database schemas is not required.
+- Add unit tests in `./tests` for important behavior only.
+
+## Product constraints
+
+This is a desktop-only application maintained and used by one person only. Keep the implementation accordingly simple.
+
+- No authentication.
+- No mobile support; optimize the UI for desktop.
+- Do not add accessibility-specific features.
+- Avoid premature optimization, unnecessary scalability work, and multi-user architecture.
