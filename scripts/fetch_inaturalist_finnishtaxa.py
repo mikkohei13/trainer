@@ -33,6 +33,7 @@ handled_log_path = images_path / "inaturalist_finnishtaxa.log"
 
 ALLOWED_RANKS = {"MX.species", "MX.genus"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+MAX_IMAGES_PER_TAXON = 50
 
 # Mirrors https://www.inaturalist.org/observations?hrank=genus&lat=64.893&lng=25.845&
 # quality_grade=research&radius=2000&verifiable=any
@@ -242,6 +243,9 @@ def download_observation_photos(
             existing_ids.add(photo_id)
             downloaded += 1
             time.sleep(REQUEST_DELAY_SEC)
+            if downloaded >= MAX_IMAGES_PER_TAXON:
+                print(f"Reached {MAX_IMAGES_PER_TAXON} images for this taxon")
+                return downloaded, skipped, already_existed
 
     return downloaded, skipped, already_existed
 

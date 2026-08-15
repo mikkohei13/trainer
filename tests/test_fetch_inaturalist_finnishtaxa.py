@@ -120,6 +120,35 @@ class TestDownloadSkipsExistingIds(unittest.TestCase):
         self.assertEqual(seen_ids, {42})
         self.assertEqual((self.tmp / "Cixius" / "42.jpg").read_bytes(), b"img")
 
+    def test_stops_after_max_new_saves_ignoring_existing_on_disk(self):
+        existing_ids = {1}
+        seen_ids: set[int] = set()
+        observations = [
+            {
+                "taxon": {"name": "Cixius"},
+                "photos": [
+                    {"id": 1, "url": "https://example.com/photos/1/square.jpg"},
+                    {"id": 2, "url": "https://example.com/photos/2/square.jpg"},
+                    {"id": 3, "url": "https://example.com/photos/3/square.jpg"},
+                    {"id": 4, "url": "https://example.com/photos/4/square.jpg"},
+                ],
+            }
+        ]
+
+        with patch.object(fetch, "MAX_IMAGES_PER_TAXON", 2):
+            with patch.object(fetch, "_http_bytes", return_value=b"img") as http_bytes:
+                with patch.object(fetch.time, "sleep"):
+                    downloaded, skipped, already_existed = fetch.download_observation_photos(
+                        observations, existing_ids, seen_ids
+                    )
+
+        self.assertEqual(http_bytes.call_count, 2)
+        self.assertEqual(downloaded, 2)
+        self.assertEqual(already_existed, 1)
+        self.assertTrue((self.tmp / "Cixius" / "2.jpg").is_file())
+        self.assertTrue((self.tmp / "Cixius" / "3.jpg").is_file())
+        self.assertFalse((self.tmp / "Cixius" / "4.jpg").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
