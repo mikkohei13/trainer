@@ -27,9 +27,12 @@ taxon_name = "auchenorrhyncha"
 target_folder = "inaturalist"
 taxa_json_path = PROJECT_ROOT / "trainer" / "data" / taxon_name / "taxa.json"
 
-target_path = PROJECT_ROOT / "trainer" / "images" / taxon_name / target_folder
+images_path = PROJECT_ROOT / "trainer" / "images" / taxon_name
+target_path = images_path / target_folder
+handled_log_path = images_path / "inaturalist_finnishtaxa.log"
 
 ALLOWED_RANKS = {"MX.species", "MX.genus"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
 # Mirrors https://www.inaturalist.org/observations?hrank=genus&lat=64.893&lng=25.845&
 # quality_grade=research&radius=2000&verifiable=any
@@ -37,7 +40,7 @@ ALLOWED_RANKS = {"MX.species", "MX.genus"}
 QUERY_PARAMS: dict = {
     "lat": 64.893,
     "lng": 25.845,
-    "radius": 2000,
+    "radius": 2500,
     "quality_grade": "research",
     "hrank": "genus",
     "per_page": 200,
@@ -64,10 +67,13 @@ def _headers_image() -> dict:
     }
 
 
-def _observations_url(taxon_id: int, page: int) -> str:
+def _observations_url(taxon_id: int, page: int, finbif_rank: str) -> str:
     params = dict(QUERY_PARAMS)
     params["taxon_id"] = taxon_id
     params["page"] = page
+    if finbif_rank == "MX.genus":
+        params.pop("hrank", None)
+        params["rank"] = "genus"
     query = urllib.parse.urlencode(params, doseq=True)
     return f"{OBSERVATIONS_URL}?{query}"
 
@@ -100,6 +106,37 @@ def _square_url_to_large(square_url: str) -> str:
     if "/square." in square_url:
         return square_url.replace("/square.", "/large.")
     return re.sub(r"/[^/]+\.(jpg|jpeg|png)(\?.*)?$", "/large.jpg", square_url, flags=re.I)
+
+
+def load_existing_photo_ids(root: Path) -> set[int]:
+    """Collect numeric photo IDs from image filenames under root (any subfolder)."""
+    ids: set[int] = set()
+    if not root.is_dir():
+        return ids
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
+            continue
+        stem = path.stem
+        if stem.isdigit():
+            ids.add(int(stem))
+    return ids
+
+
+def load_handled_taxa(path: Path) -> set[str]:
+    if not path.is_file():
+        return set()
+    names: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name = line.strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def mark_taxon_handled(path: Path, scientific_name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(scientific_name + "\n")
 
 
 def load_finbif_taxa() -> list[dict]:
@@ -141,11 +178,11 @@ def lookup_inaturalist_taxon_id(scientific_name: str) -> int | None:
     return None
 
 
-def fetch_observations_for_taxon(taxon_id: int) -> list:
+def fetch_observations_for_taxon(taxon_id: int, finbif_rank: str) -> list:
     rows = []
     page = 1
     while True:
-        url = _observations_url(taxon_id, page)
+        url = _observations_url(taxon_id, page, finbif_rank)
         data = _http_json(url)
         time.sleep(REQUEST_DELAY_SEC)
         batch = data.get("results") or []
@@ -163,6 +200,7 @@ def fetch_observations_for_taxon(taxon_id: int) -> list:
 
 def download_observation_photos(
     observations: list,
+    existing_ids: set[int],
     seen_ids: set[int],
 ) -> tuple[int, int, int]:
     downloaded = 0
@@ -189,20 +227,19 @@ def download_observation_photos(
             if photo_id is None:
                 skipped += 1
                 continue
+            if photo_id in existing_ids:
+                already_existed += 1
+                continue
             if photo_id in seen_ids:
                 continue
             seen_ids.add(photo_id)
 
             out_file = out_dir / f"{photo_id}.jpg"
-            if out_file.is_file():
-                print(f"Already exists, skipping {out_file}")
-                already_existed += 1
-                continue
-
             large_url = _square_url_to_large(photo["url"])
             print(f"Scientific name: {scientific}, photo {photo_id}")
             print(f"Downloading image from {large_url}, saving to {out_file}")
             out_file.write_bytes(_http_bytes(large_url))
+            existing_ids.add(photo_id)
             downloaded += 1
             time.sleep(REQUEST_DELAY_SEC)
 
@@ -212,6 +249,10 @@ def download_observation_photos(
 def main() -> None:
     target_path.mkdir(parents=True, exist_ok=True)
     taxa = load_finbif_taxa()
+    existing_ids = load_existing_photo_ids(target_path)
+    print(f"Found {len(existing_ids)} existing images under {target_path}")
+    handled = load_handled_taxa(handled_log_path)
+    print(f"Found {len(handled)} already handled taxa in {handled_log_path}")
     seen_ids: set[int] = set()
     downloaded = 0
     skipped = 0
@@ -222,22 +263,30 @@ def main() -> None:
         name = taxon["scientific_name"]
         rank = taxon["taxon_rank"]
         print(f"\n[{index}/{len(taxa)}] {name} ({rank})")
+        if name in handled:
+            print(f"Already handled, skipping")
+            continue
 
         taxon_id = lookup_inaturalist_taxon_id(name)
         if taxon_id is None:
             unmatched += 1
+            mark_taxon_handled(handled_log_path, name)
+            handled.add(name)
             continue
 
         print(f"Fetching observations for taxon_id={taxon_id}, radius={QUERY_PARAMS['radius']}")
-        observations = fetch_observations_for_taxon(taxon_id)
+        observations = fetch_observations_for_taxon(taxon_id, rank)
         print(f"Got {len(observations)} observations for {name}")
-        if not observations:
-            continue
+        if observations:
+            new, skip, existed = download_observation_photos(
+                observations, existing_ids, seen_ids
+            )
+            downloaded += new
+            skipped += skip
+            already_existed += existed
 
-        new, skip, existed = download_observation_photos(observations, seen_ids)
-        downloaded += new
-        skipped += skip
-        already_existed += existed
+        mark_taxon_handled(handled_log_path, name)
+        handled.add(name)
 
     print(
         f"\nDone. Downloaded {downloaded} new images to {target_path}. "
