@@ -295,23 +295,29 @@
 {% if project['identification_rank'] == 'family' %}
 <p>Family-level training not implemented yet</p>
 {% elif stats.taxa %}
-<table>
+<table class="anno-table">
   <thead>
     <tr>
       <th>Taxon</th>
-      <th>Images</th>
+      <th class="num">Finland observations</th>
+      <th class="num">Images</th>
+      <th class="num">Img/Obs ratio</th>
     </tr>
   </thead>
   <tbody>
     {% for t in stats.taxa %}
     <tr>
       <td>{{ t.taxon }}</td>
-      <td>{{ t.count }}</td>
+      <td class="num">{{ t.observation_count_finland }}</td>
+      <td class="num">{{ t.count }}</td>
+      <td class="num">{{ t.images_per_observation | round(4) if t.images_per_observation is not none else "—" }}</td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+{% elif harmonization_rows is none %}
+<p class="empty">Generate taxon name harmonization to see images per taxon.</p>
 {% else %}
-<p class="empty">No taxon folders found.</p>
+<p class="empty">No harmonized taxa.</p>
 {% endif %}
 {% endblock %}

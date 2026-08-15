@@ -15,44 +15,104 @@ def count_images(path: Path) -> int:
 def project_stats(taxon: str, identification_rank: str = "species") -> dict:
     project_dir = IMAGES_DIR / taxon
     collections = []
-    taxa_rows = []
 
     if project_dir.is_dir():
         for collection_dir in sorted(project_dir.iterdir()):
             if not collection_dir.is_dir():
                 continue
-            collection_count = count_images(collection_dir)
             collections.append({
                 "name": collection_dir.name,
-                "count": collection_count,
+                "count": count_images(collection_dir),
             })
-            for taxon_dir in sorted(collection_dir.iterdir()):
-                if not taxon_dir.is_dir():
-                    continue
-                count = sum(
-                    1 for f in taxon_dir.iterdir()
-                    if f.is_file() and f.suffix.lower() in IMAGE_EXTS
-                )
-                name = taxon_dir.name
-                existing = next((t for t in taxa_rows if t["taxon"] == name), None)
-                if existing:
-                    existing["count"] += count
-                else:
-                    taxa_rows.append({"taxon": name, "count": count})
 
     if identification_rank == "genus":
-        taxa_rows = _aggregate_taxa_by_genus(taxa_rows)
+        taxa_rows = _harmonized_taxa_by_genus(taxon)
+    else:
+        taxa_rows = _harmonized_taxa_by_species(taxon)
+
+    for row in taxa_rows:
+        row["images_per_observation"] = _images_per_observation(
+            row["count"], row.get("observation_count_finland", "")
+        )
 
     anno = _project_annotation_distribution(taxon)
     return {"collections": collections, "taxa": taxa_rows, "annotation": anno}
 
 
-def _aggregate_taxa_by_genus(taxa_rows: list[dict]) -> list[dict]:
+def _images_per_observation(count: int, observation_count: str) -> float | None:
+    if not observation_count:
+        return None
+    obs = int(observation_count)
+    if obs <= 0:
+        return None
+    return count / obs
+
+
+def _load_project_taxa(project: str) -> list[dict]:
+    from trainer.harmonize import load_taxa_json, taxa_json_path
+
+    path = taxa_json_path(project)
+    if not path.is_file():
+        return []
+    return load_taxa_json(path)
+
+
+def _harmonization_rows(project: str) -> list[dict]:
+    from trainer.harmonize import harmonization_path, read_harmonization
+
+    rows = read_harmonization(harmonization_path(project))
+    if not rows:
+        return []
+    return [r for r in rows if r.get("authoritative_name")]
+
+
+def _image_count(row: dict) -> int:
+    raw = row.get("image_count") or "0"
+    return int(raw)
+
+
+def _harmonized_taxa_by_species(project: str) -> list[dict]:
+    by_name: dict[str, dict] = {}
+    for row in _harmonization_rows(project):
+        name = row["authoritative_name"]
+        existing = by_name.get(name)
+        if existing is None:
+            by_name[name] = {
+                "taxon": name,
+                "count": _image_count(row),
+                "observation_count_finland": row.get("observation_count_finland", ""),
+            }
+        else:
+            existing["count"] += _image_count(row)
+    return [by_name[name] for name in sorted(by_name)]
+
+
+def _genus_observation_count(genus_name: str, finbif_taxa: list[dict]) -> str:
+    from trainer.harmonize import normalize_name
+
+    target = normalize_name(genus_name)
+    for taxon in finbif_taxa:
+        if taxon.get("taxon_rank") != "MX.genus":
+            continue
+        if normalize_name(taxon["scientific_name"]) == target:
+            return taxon.get("observation_count_finland", "")
+    return ""
+
+
+def _harmonized_taxa_by_genus(project: str) -> list[dict]:
     counts: dict[str, int] = {}
-    for row in taxa_rows:
-        genus = row["taxon"].split("_", 1)[0]
-        counts[genus] = counts.get(genus, 0) + row["count"]
-    return [{"taxon": name, "count": counts[name]} for name in sorted(counts)]
+    for row in _harmonization_rows(project):
+        genus = row["authoritative_name"].split()[0]
+        counts[genus] = counts.get(genus, 0) + _image_count(row)
+    finbif_taxa = _load_project_taxa(project)
+    return [
+        {
+            "taxon": name,
+            "count": counts[name],
+            "observation_count_finland": _genus_observation_count(name, finbif_taxa),
+        }
+        for name in sorted(counts)
+    ]
 
 
 def project_annotation_buckets(taxon: str) -> dict[str, list[str]]:

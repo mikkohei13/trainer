@@ -28,12 +28,15 @@ def normalize_name(name: str) -> str:
     return name.strip().lower().replace("_", " ")
 
 
+
 def taxa_json_path(project: str) -> Path:
     return DATA_DIR / project / TAXA_JSON_NAME
 
 
 def harmonization_path(project: str) -> Path:
     return DATA_DIR / project / HARMONIZATION_NAME
+
+
 
 
 def collect_image_name_counts(project: str) -> dict[str, int]:
@@ -87,6 +90,7 @@ def load_taxa_json(path: Path) -> list[dict]:
             "scientific_name": scientific,
             "synonyms": synonyms,
             "observation_count_finland": observation_count,
+            "taxon_rank": item.get("taxonRank") or "",
         })
     return rows
 
