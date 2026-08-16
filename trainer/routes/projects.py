@@ -10,6 +10,7 @@ from trainer.harmonize import (
 )
 from trainer.images import (
     IMAGES_DIR,
+    annotation_paths,
     normalize_annotation_bucket,
     project_annotation_buckets,
     project_stats,
@@ -147,8 +148,7 @@ def annotation_gallery(taxon: str):
         page = 1
     page = max(1, page)
 
-    buckets = project_annotation_buckets(taxon)
-    paths = buckets.get(bucket_key, [])
+    paths = annotation_paths(taxon, bucket_key)
     total = len(paths)
     total_pages = max(1, (total + GALLERY_PER_PAGE - 1) // GALLERY_PER_PAGE) if total else 1
     if page > total_pages:

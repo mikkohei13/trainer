@@ -15,6 +15,9 @@
 <div class="annotate-toolbar">
   <button type="button" id="btn-prev" {% if not prev_url %}disabled{% endif %}>← Prev</button>
   <form class="jump-form" id="jump-form" method="get" action="{{ url_for('annotate.annotate', taxon=project.taxon) }}">
+    {% if bucket_key %}
+    <input type="hidden" name="bucket" value="{{ bucket_key }}">
+    {% endif %}
     <input type="number" name="i" value="{{ current_num }}" min="1" max="{{ total }}">
     <span class="annotate-counter">/ {{ total }}</span>
     <button type="submit">Go</button>
@@ -250,7 +253,13 @@
     if (isNaN(i)) {
       return;
     }
-    const url = this.action + "?i=" + i;
+    const params = new URLSearchParams();
+    params.set("i", String(i));
+    const bucket = this.querySelector("input[name='bucket']");
+    if (bucket && bucket.value) {
+      params.set("bucket", bucket.value);
+    }
+    const url = this.action + "?" + params.toString();
     navigateTo(url);
   });
 

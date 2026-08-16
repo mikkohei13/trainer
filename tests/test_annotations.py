@@ -145,6 +145,34 @@ class TestAnnotations(unittest.TestCase):
         self.assertIsNone(images.normalize_annotation_bucket("bad"))
         self.assertIsNone(images.normalize_annotation_bucket(None))
 
+    def test_shuffled_annotation_paths_stable_and_filtered(self):
+        _orig_images = images.IMAGES_DIR
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            images.IMAGES_DIR = tmp
+            (tmp / "t" / "c").mkdir(parents=True)
+            names = [f"{i}.jpg" for i in range(8)]
+            for name in names:
+                (tmp / "t" / "c" / name).write_bytes(b"x")
+            db.save_annotations("t/c/0.jpg", [], True)
+
+            sorted_paths = images.list_project_image_paths("t")
+            shuffled = images.shuffled_project_image_paths("t")
+            self.assertEqual(sorted(shuffled), sorted_paths)
+            self.assertEqual(shuffled, images.shuffled_project_image_paths("t"))
+            self.assertNotEqual(shuffled, sorted_paths)
+
+            bucket = images.annotation_paths("t", "not_annotated")
+            self.assertEqual(bucket, [p for p in shuffled if p != "t/c/0.jpg"])
+
+            with_current = images.annotation_paths(
+                "t", "not_annotated", include="t/c/0.jpg"
+            )
+            self.assertEqual(with_current, shuffled)
+        finally:
+            images.IMAGES_DIR = _orig_images
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

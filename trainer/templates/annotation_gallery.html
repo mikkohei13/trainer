@@ -24,7 +24,7 @@
   <li class="thumb-item">
     <a
       class="thumb-link"
-      href="{{ url_for('annotate.annotate', taxon=project.taxon, path=p) }}"
+      href="{{ url_for('annotate.annotate', taxon=project.taxon, path=p, bucket=bucket_key) }}"
       title="Annotate: {{ p }}"
     >
       <img

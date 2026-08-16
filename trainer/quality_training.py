@@ -3,10 +3,11 @@
 import logging
 import math
 import multiprocessing
+import os
 import random
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from trainer import db
 from trainer.images import IMAGES_DIR
@@ -25,11 +26,18 @@ BBOX_PADDING_FRACTION = 0.10
 
 def start_quality_training_process(run_id: int, taxon: str) -> None:
     ctx = multiprocessing.get_context("spawn")
-    p = ctx.Process(target=_blocking_quality_train, args=(run_id, taxon), daemon=True)
+    p = ctx.Process(target=_blocking_quality_train, args=(run_id, taxon), daemon=False)
     p.start()
 
 
 def _blocking_quality_train(run_id: int, taxon: str) -> None:
+    try:
+        os.setsid()
+    except OSError:
+        pass
+
+    db.set_quality_training_run_pid(run_id, os.getpid())
+
     run_dir = MODELS_DIR / taxon / "quality" / str(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "train.log"
@@ -230,8 +238,18 @@ def _collect_quality_records(taxon: str) -> list[dict]:
     quality_map = db.get_image_quality_map(taxon)
     records = []
     for image_path, quality in quality_map.items():
+        src = IMAGES_DIR / image_path
+        if not src.is_file():
+            print(f"[quality] skip missing image: {image_path}", flush=True)
+            continue
         annotations = db.get_annotations(image_path)
         if not annotations["boxes"]:
+            continue
+        try:
+            with Image.open(src) as img:
+                img.verify()
+        except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+            print(f"[quality] skip unreadable image {image_path}: {exc}", flush=True)
             continue
         records.append({
             "image_path": image_path,

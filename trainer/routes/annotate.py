@@ -11,8 +11,9 @@ from flask import (
 from trainer import db
 from trainer.images import (
     IMAGES_DIR,
+    annotation_paths,
     image_path_under_images_root,
-    list_project_image_paths,
+    normalize_annotation_bucket,
 )
 
 bp = Blueprint("annotate", __name__)
@@ -34,7 +35,9 @@ def annotate(taxon: str):
     if project is None:
         return redirect(url_for("projects.index"))
 
-    paths = list_project_image_paths(taxon)
+    bucket_key = normalize_annotation_bucket(request.args.get("bucket"))
+    requested_path = request.args.get("path", "")
+    paths = annotation_paths(taxon, bucket_key, include=requested_path or None)
 
     if not paths:
         return render_template(
@@ -48,9 +51,10 @@ def annotate(taxon: str):
             total=0,
             show_detect=False,
             detect_api_url="",
+            bucket_key=bucket_key,
         )
 
-    image_path = request.args.get("path", "")
+    image_path = requested_path
     if image_path not in paths:
         try:
             i = int(request.args.get("i", 1))
@@ -63,12 +67,13 @@ def annotate(taxon: str):
     prev_path = paths[idx - 1] if idx > 0 else None
     next_path = paths[idx + 1] if idx < len(paths) - 1 else None
 
-    prev_url = (
-        url_for("annotate.annotate", taxon=taxon, path=prev_path) if prev_path else None
-    )
-    next_url = (
-        url_for("annotate.annotate", taxon=taxon, path=next_path) if next_path else None
-    )
+    def _annotate_url(path: str) -> str:
+        if bucket_key:
+            return url_for("annotate.annotate", taxon=taxon, path=path, bucket=bucket_key)
+        return url_for("annotate.annotate", taxon=taxon, path=path)
+
+    prev_url = _annotate_url(prev_path) if prev_path else None
+    next_url = _annotate_url(next_path) if next_path else None
 
     annotations = db.get_annotations(image_path)
 
@@ -90,4 +95,5 @@ def annotate(taxon: str):
         total=len(paths),
         show_detect=show_detect,
         detect_api_url=detect_api_url,
+        bucket_key=bucket_key,
     )

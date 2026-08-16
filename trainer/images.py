@@ -1,5 +1,6 @@
 """Image filesystem helpers under trainer/images/."""
 
+import random
 from pathlib import Path
 
 from trainer import db
@@ -194,6 +195,28 @@ def list_project_image_paths(taxon: str) -> list[str]:
             paths.append(str(rel).replace("\\", "/"))
     paths.sort()
     return paths
+
+
+def shuffled_project_image_paths(taxon: str) -> list[str]:
+    """Stable shuffle of project images (same taxon → same order)."""
+    paths = list_project_image_paths(taxon)
+    random.Random(taxon).shuffle(paths)
+    return paths
+
+
+def annotation_paths(
+    taxon: str,
+    bucket_key: str | None = None,
+    include: str | None = None,
+) -> list[str]:
+    """Shuffled image list, optionally limited to an annotation bucket."""
+    paths = shuffled_project_image_paths(taxon)
+    if bucket_key is None:
+        return paths
+    allowed = set(project_annotation_buckets(taxon).get(bucket_key, []))
+    if include:
+        allowed.add(include)
+    return [p for p in paths if p in allowed]
 
 
 def image_path_under_images_root(image_path: str) -> bool:

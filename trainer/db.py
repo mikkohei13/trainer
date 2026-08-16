@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,7 +55,8 @@ def init_db() -> None:
                 model_path   TEXT,
                 map50        REAL,
                 map50_95     REAL,
-                log_path     TEXT
+                log_path     TEXT,
+                pid          INTEGER
             )
         """)
         con.execute("""
@@ -66,7 +68,8 @@ def init_db() -> None:
                 finished_at  TEXT,
                 model_path   TEXT,
                 val_rmse     REAL,
-                log_path     TEXT
+                log_path     TEXT,
+                pid          INTEGER
             )
         """)
         con.execute("""
@@ -76,6 +79,8 @@ def init_db() -> None:
             )
         """)
         _migrate_image_quality(con)
+        _migrate_training_run_pid(con)
+        _migrate_quality_training_run_pid(con)
 
 
 def _migrate_project_active_training_run(con: sqlite3.Connection) -> None:
@@ -110,6 +115,30 @@ def _migrate_image_quality(con: sqlite3.Connection) -> None:
     columns = {row[1] for row in cur.fetchall()}
     if columns and "quality" not in columns:
         con.execute("ALTER TABLE image_quality ADD COLUMN quality REAL NOT NULL DEFAULT 0.0")
+
+
+def _migrate_training_run_pid(con: sqlite3.Connection) -> None:
+    cur = con.execute("PRAGMA table_info(training_run)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "pid" not in columns:
+        con.execute("ALTER TABLE training_run ADD COLUMN pid INTEGER")
+
+
+def _migrate_quality_training_run_pid(con: sqlite3.Connection) -> None:
+    cur = con.execute("PRAGMA table_info(quality_training_run)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "pid" not in columns:
+        con.execute("ALTER TABLE quality_training_run ADD COLUMN pid INTEGER")
+
+
+def _pid_is_alive(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ProcessLookupError, ValueError):
+        return False
+    return True
 
 
 def get_projects() -> list[sqlite3.Row]:
@@ -308,6 +337,22 @@ def finish_quality_training_run(
         )
 
 
+def set_training_run_pid(run_id: int, pid: int) -> None:
+    with get_connection() as con:
+        con.execute(
+            "UPDATE training_run SET pid = ? WHERE id = ?",
+            (pid, run_id),
+        )
+
+
+def set_quality_training_run_pid(run_id: int, pid: int) -> None:
+    with get_connection() as con:
+        con.execute(
+            "UPDATE quality_training_run SET pid = ? WHERE id = ?",
+            (pid, run_id),
+        )
+
+
 def fail_training_run(run_id: int, log_path: str) -> None:
     finished_at = datetime.now(timezone.utc).isoformat()
     with get_connection() as con:
@@ -465,22 +510,35 @@ def get_active_quality_model_path_for_taxon(taxon: str) -> Path | None:
 
 
 def fail_stale_training_runs() -> None:
-    """Mark any runs still in 'training' status as failed (app was restarted mid-run)."""
+    """Mark 'training' runs whose process is no longer alive as failed."""
     finished_at = datetime.now(timezone.utc).isoformat()
     with get_connection() as con:
-        con.execute(
-            "UPDATE training_run SET status = 'failed', finished_at = ? WHERE status = 'training'",
-            (finished_at,),
-        )
+        rows = con.execute(
+            "SELECT id, pid FROM training_run WHERE status = 'training'"
+        ).fetchall()
+        for row in rows:
+            if _pid_is_alive(row["pid"]):
+                continue
+            con.execute(
+                "UPDATE training_run SET status = 'failed', finished_at = ? WHERE id = ?",
+                (finished_at, row["id"]),
+            )
 
 
 def fail_stale_quality_training_runs() -> None:
+    """Mark 'training' quality runs whose process is no longer alive as failed."""
     finished_at = datetime.now(timezone.utc).isoformat()
     with get_connection() as con:
-        con.execute(
-            "UPDATE quality_training_run SET status = 'failed', finished_at = ? WHERE status = 'training'",
-            (finished_at,),
-        )
+        rows = con.execute(
+            "SELECT id, pid FROM quality_training_run WHERE status = 'training'"
+        ).fetchall()
+        for row in rows:
+            if _pid_is_alive(row["pid"]):
+                continue
+            con.execute(
+                "UPDATE quality_training_run SET status = 'failed', finished_at = ? WHERE id = ?",
+                (finished_at, row["id"]),
+            )
 
 
 def project_annotation_state(taxon: str) -> tuple[set[str], dict[str, int]]:

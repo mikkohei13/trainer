@@ -44,3 +44,7 @@ uv run python -m unittest discover -s tests -v
 See ARCHITECTURE.md for the system architecture details.
 
 See AGENTS.md for the development principles and product constraints.
+
+## Notes
+
+- iNat observations often contain multiple nearly similar images of the same individual. These can cause leaking/overfitting. 

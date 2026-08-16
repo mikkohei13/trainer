@@ -147,6 +147,46 @@ class TestExportYoloDataset(unittest.TestCase):
         finally:
             shutil.rmtree(output_dir, ignore_errors=True)
 
+    def test_export_skips_missing_and_unreadable(self):
+        db.save_annotations("bugs/col/a.jpg", [], True)
+        db.save_annotations("bugs/col/b.jpg", [], True)
+        db.save_annotations("bugs/col/c.jpg", [], True)
+
+        # Annotation exists but file was deleted
+        (self._tmp_images / "bugs" / "col" / "b.jpg").unlink()
+        # Corrupt / unreadable file
+        (self._tmp_images / "bugs" / "col" / "c.jpg").write_bytes(b"not-an-image")
+
+        output_dir = Path(tempfile.mkdtemp())
+        try:
+            train_count, val_count = training.export_yolo_dataset("bugs", output_dir)
+            self.assertEqual(train_count + val_count, 1)
+            images_out = list((output_dir / "images").rglob("*.jpg"))
+            self.assertEqual(len(images_out), 1)
+            self.assertTrue(images_out[0].name.endswith("a.jpg"))
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+
+
+class TestParseMissingImagePath(unittest.TestCase):
+    def test_errno_style(self):
+        path = "/private/var/folders/x/T/tmpabc/images/train/bugs_col_a.jpg"
+        exc = FileNotFoundError(2, "No such file or directory", path)
+        self.assertEqual(training.parse_missing_image_path(exc), path)
+
+    def test_ultralytics_message(self):
+        path = "/tmp/ds/images/train/bugs_col_a.jpg"
+        exc = Exception(f'Image Not Found {path}')
+        self.assertEqual(training.parse_missing_image_path(exc), path)
+
+    def test_quoted_errno_message(self):
+        path = "/tmp/ds/images/val/bugs_col_b.jpeg"
+        exc = OSError(f"[Errno 2] No such file or directory: '{path}'")
+        self.assertEqual(training.parse_missing_image_path(exc), path)
+
+    def test_unrelated_error_returns_none(self):
+        self.assertIsNone(training.parse_missing_image_path(ValueError("boom")))
+
 
 if __name__ == "__main__":
     unittest.main()
