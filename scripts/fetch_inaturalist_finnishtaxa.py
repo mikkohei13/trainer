@@ -17,6 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+import random
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -49,8 +50,6 @@ QUERY_PARAMS: dict = {
     "order": "asc",
     "fields": "(photos:(id:!t,url:!t),taxon:(name:!t,rank:!t))",
 }
-
-REQUEST_DELAY_SEC = 2.0
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
@@ -169,7 +168,11 @@ def lookup_inaturalist_taxon_id(scientific_name: str) -> int | None:
     url = f"{TAXA_LOOKUP_URL}?{urllib.parse.urlencode(params)}"
     print(f"Looking up iNaturalist taxon id for '{scientific_name}'")
     data = _http_json(url)
-    time.sleep(REQUEST_DELAY_SEC)
+
+    sleep_sec = random.uniform(0.5, 1)
+    time.sleep(sleep_sec)
+    print(f"Sleeping for {sleep_sec} seconds")
+
     for result in data.get("results") or []:
         if result.get("name") == scientific_name:
             taxon_id = result.get("id")
@@ -185,7 +188,11 @@ def fetch_observations_for_taxon(taxon_id: int, finbif_rank: str) -> list:
     while True:
         url = _observations_url(taxon_id, page, finbif_rank)
         data = _http_json(url)
-        time.sleep(REQUEST_DELAY_SEC)
+
+        sleep_sec = random.uniform(0.5, 1)
+        time.sleep(sleep_sec)
+        print(f"Sleeping for {sleep_sec} seconds")
+
         batch = data.get("results") or []
         if not batch:
             break
@@ -207,20 +214,27 @@ def download_observation_photos(
     downloaded = 0
     skipped = 0
     already_existed = 0
+    photo_index = 0
 
-    for obs in observations:
-        photos = obs.get("photos") or []
-        taxon = obs.get("taxon") or {}
-        scientific = taxon.get("name")
-        if not scientific:
-            skipped += 1
-            continue
+    while downloaded < MAX_IMAGES_PER_TAXON:
+        had_photo_at_index = False
+        for obs in observations:
+            photos = obs.get("photos") or []
+            if photo_index >= len(photos):
+                continue
+            had_photo_at_index = True
+            photo = photos[photo_index]
 
-        folder = _folder_name(scientific)
-        out_dir = target_path / folder
-        out_dir.mkdir(parents=True, exist_ok=True)
+            taxon = obs.get("taxon") or {}
+            scientific = taxon.get("name")
+            if not scientific:
+                skipped += 1
+                continue
 
-        for photo in photos:
+            folder = _folder_name(scientific)
+            out_dir = target_path / folder
+            out_dir.mkdir(parents=True, exist_ok=True)
+
             if photo.get("url") is None:
                 skipped += 1
                 continue
@@ -242,10 +256,18 @@ def download_observation_photos(
             out_file.write_bytes(_http_bytes(large_url))
             existing_ids.add(photo_id)
             downloaded += 1
-            time.sleep(REQUEST_DELAY_SEC)
+
+            sleep_sec = random.uniform(0.5, 2.5)
+            time.sleep(sleep_sec)
+            print(f"Sleeping for {sleep_sec} seconds")
+
             if downloaded >= MAX_IMAGES_PER_TAXON:
                 print(f"Reached {MAX_IMAGES_PER_TAXON} images for this taxon")
                 return downloaded, skipped, already_existed
+
+        if not had_photo_at_index:
+            break
+        photo_index += 1
 
     return downloaded, skipped, already_existed
 

@@ -149,6 +149,52 @@ class TestDownloadSkipsExistingIds(unittest.TestCase):
         self.assertTrue((self.tmp / "Cixius" / "3.jpg").is_file())
         self.assertFalse((self.tmp / "Cixius" / "4.jpg").exists())
 
+    def test_takes_first_photo_of_each_observation_before_later_photos(self):
+        existing_ids: set[int] = set()
+        seen_ids: set[int] = set()
+        observations = [
+            {
+                "taxon": {"name": "Cixius"},
+                "photos": [
+                    {"id": 10, "url": "https://example.com/photos/10/square.jpg"},
+                    {"id": 11, "url": "https://example.com/photos/11/square.jpg"},
+                    {"id": 12, "url": "https://example.com/photos/12/square.jpg"},
+                ],
+            },
+            {
+                "taxon": {"name": "Cixius"},
+                "photos": [
+                    {"id": 20, "url": "https://example.com/photos/20/square.jpg"},
+                    {"id": 21, "url": "https://example.com/photos/21/square.jpg"},
+                ],
+            },
+            {
+                "taxon": {"name": "Cixius"},
+                "photos": [
+                    {"id": 30, "url": "https://example.com/photos/30/square.jpg"},
+                ],
+            },
+        ]
+
+        with patch.object(fetch, "MAX_IMAGES_PER_TAXON", 4):
+            with patch.object(fetch, "_http_bytes", return_value=b"img") as http_bytes:
+                with patch.object(fetch.time, "sleep"):
+                    downloaded, skipped, already_existed = fetch.download_observation_photos(
+                        observations, existing_ids, seen_ids
+                    )
+
+        self.assertEqual(http_bytes.call_count, 4)
+        self.assertEqual(downloaded, 4)
+        self.assertEqual(skipped, 0)
+        self.assertEqual(already_existed, 0)
+        self.assertEqual(existing_ids, {10, 20, 30, 11})
+        self.assertTrue((self.tmp / "Cixius" / "10.jpg").is_file())
+        self.assertTrue((self.tmp / "Cixius" / "20.jpg").is_file())
+        self.assertTrue((self.tmp / "Cixius" / "30.jpg").is_file())
+        self.assertTrue((self.tmp / "Cixius" / "11.jpg").is_file())
+        self.assertFalse((self.tmp / "Cixius" / "12.jpg").exists())
+        self.assertFalse((self.tmp / "Cixius" / "21.jpg").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
