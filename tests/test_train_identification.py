@@ -1,22 +1,25 @@
-"""Unit tests for identification training helpers (no OD / no full train)."""
+"""Unit tests for identification crop / train helpers (no OD / no full train)."""
 
 import importlib.util
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
 from PIL import Image
 
 
-def _load_script():
-    path = Path(__file__).resolve().parent.parent / "scripts" / "train_identification.py"
-    spec = importlib.util.spec_from_file_location("train_identification", path)
+def _load_script(name: str):
+    path = Path(__file__).resolve().parent.parent / "scripts" / name
+    spec = importlib.util.spec_from_file_location(name.replace(".py", ""), path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
 
-tid = _load_script()
+tid = _load_script("train_identification.py")
+crop = _load_script("crop_identification_images.py")
 
 
 class TestGenusFromAuthoritative(unittest.TestCase):
@@ -38,7 +41,6 @@ class TestFilterByMinCount(unittest.TestCase):
             ("a/2.jpg", "Alpha"),
             ("b/1.jpg", "Beta"),
         ]
-        # pad Alpha to 10
         labeled += [(f"a/{i}.jpg", "Alpha") for i in range(3, 11)]
         out = tid.filter_by_min_count(labeled, min_count=10)
         genera = {g for _, g in out}
@@ -58,14 +60,39 @@ class TestLetterbox(unittest.TestCase):
         self.assertEqual(out.size, (32, 32))
 
 
-class TestCropFilename(unittest.TestCase):
-    def test_encodes_path(self):
-        name = tid.crop_filename_for_source(
-            "auchenorrhyncha/britishbugs/Acericerus_ribauti/Acericerus_ribauti_0.jpg"
-        )
-        self.assertNotIn("/", name)
-        self.assertTrue(name.endswith(".jpg"))
-        self.assertIn("britishbugs", name)
+class TestProcessedPath(unittest.TestCase):
+    def test_mirrors_layout(self):
+        rel = "auchenorrhyncha/britishbugs/Acericerus_ribauti/Acericerus_ribauti_0.jpg"
+        out = crop.processed_path_for(rel)
+        self.assertEqual(out, crop.PROCESSED_DIR / rel)
+
+
+class TestCropBoxPadding(unittest.TestCase):
+    def test_pads_and_clamps(self):
+        img = Image.new("RGB", (100, 100), (0, 0, 0))
+        box = {"x": 10.0, "y": 10.0, "w": 20.0, "h": 20.0}
+        cropped = crop.crop_box_with_padding(img, box, 0.10)
+        # 10% of 20 = 2 → 8..32
+        self.assertEqual(cropped.size, (24, 24))
+
+
+class TestListProcessed(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self._orig = tid.PROCESSED_DIR
+        tid.PROCESSED_DIR = self.tmp
+
+    def tearDown(self):
+        tid.PROCESSED_DIR = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_lists_images(self):
+        root = self.tmp / "bugs" / "col" / "Genus_sp"
+        root.mkdir(parents=True)
+        (root / "a.jpg").write_bytes(b"x")
+        (root / "notes.txt").write_text("nope")
+        paths = tid.list_processed_image_paths("bugs")
+        self.assertEqual(paths, ["bugs/col/Genus_sp/a.jpg"])
 
 
 if __name__ == "__main__":

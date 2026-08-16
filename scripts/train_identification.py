@@ -1,11 +1,15 @@
 """
 Train a genus identification model for a project (v1, decoupled CLI).
 
+Expects OD-cropped images from scripts/crop_identification_images.py under
+trainer/images_processed/<project>/ (same layout as trainer/images/).
+
 Hardcoded parameters — edit constants below, then:
 
+    uv run python scripts/crop_identification_images.py   # once / incremental
     uv run python scripts/train_identification.py
 
-Never modifies originals under trainer/images/. Crops and artifacts go to
+Never modifies originals under trainer/images/. Training artifacts go to
 trainer/models/<project>/identification/<run_id>/.
 """
 
@@ -13,21 +17,18 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import random
-import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageEnhance, UnidentifiedImageError
+from PIL import Image, ImageEnhance
 from sklearn.model_selection import train_test_split
 
 from trainer import db
 from trainer.harmonize import harmonization_path, read_harmonization
-from trainer.images import IMAGES_DIR, list_project_image_paths
-from trainer.inference import predict_top_box
+from trainer.images import IMAGE_EXTS
 
 # ---------------------------------------------------------------------------
 # Hardcoded parameters
@@ -52,11 +53,11 @@ FOCAL_GAMMA = 2.0
 FOCAL_ALPHA = 0.25
 PATIENCE = 4
 NUM_WORKERS = 0
-BBOX_PADDING_FRACTION = 0.10
 BASE_MODEL = "tf_efficientnetv2_s.in21k"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_ROOT / "trainer" / "models"
+PROCESSED_DIR = PROJECT_ROOT / "trainer" / "images_processed"
 
 # ---------------------------------------------------------------------------
 # Logging helpers
@@ -83,7 +84,7 @@ def _log(logger: logging.Logger, msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Label / crop dataset building
+# Labels from processed crops
 # ---------------------------------------------------------------------------
 
 
@@ -109,11 +110,25 @@ def build_folder_to_genus(project: str) -> dict[str, str]:
     return mapping
 
 
+def list_processed_image_paths(project: str) -> list[str]:
+    """Paths relative to PROCESSED_DIR, e.g. project/collection/taxon/file.jpg."""
+    project_dir = PROCESSED_DIR / project
+    if not project_dir.is_dir():
+        return []
+    paths = []
+    for f in project_dir.rglob("*"):
+        if f.is_file() and f.suffix.lower() in IMAGE_EXTS:
+            rel = f.relative_to(PROCESSED_DIR)
+            paths.append(str(rel).replace("\\", "/"))
+    paths.sort()
+    return paths
+
+
 def collect_labeled_paths(project: str) -> list[tuple[str, str]]:
-    """Return (relative_image_path, genus) for harmonized images."""
+    """Return (processed_rel_path, genus) for harmonized cropped images."""
     folder_to_genus = build_folder_to_genus(project)
     labeled: list[tuple[str, str]] = []
-    for rel in list_project_image_paths(project):
+    for rel in list_processed_image_paths(project):
         folder = folder_name_from_image_path(rel)
         genus = folder_to_genus.get(folder)
         if genus is None:
@@ -131,108 +146,8 @@ def filter_by_min_count(
     return [(path, genus) for path, genus in labeled if genus in keep]
 
 
-def crop_filename_for_source(rel_path: str) -> str:
-    """Stable unique filename from relative path (no path separators)."""
-    stem = re.sub(r"[^\w.\-]+", "_", rel_path.replace("/", "__"))
-    if not stem.lower().endswith((".jpg", ".jpeg", ".png")):
-        stem = stem + ".jpg"
-    return stem
-
-
-def crop_box_with_padding(img: Image.Image, box: dict, pad_frac: float) -> Image.Image:
-    img_w, img_h = img.size
-    x = float(box["x"])
-    y = float(box["y"])
-    w = float(box["w"])
-    h = float(box["h"])
-
-    pad_x = w * pad_frac
-    pad_y = h * pad_frac
-
-    left = max(0, int(math.floor(x - pad_x)))
-    top = max(0, int(math.floor(y - pad_y)))
-    right = min(img_w, int(math.ceil(x + w + pad_x)))
-    bottom = min(img_h, int(math.ceil(y + h + pad_y)))
-
-    if right <= left or bottom <= top:
-        return img.copy()
-    return img.crop((left, top, right, bottom))
-
-
-def build_crop_dataset(
-    project: str,
-    run_dir: Path,
-    labeled: list[tuple[str, str]],
-    logger: logging.Logger,
-) -> list[dict]:
-    """
-    Run OD on each image, save padded crops under run_dir/crops/, return records.
-    Never writes into trainer/images/.
-    """
-    model_path = db.get_active_model_path_for_taxon(project)
-    if model_path is None:
-        raise SystemExit(
-            f"No active object-detection model for project '{project}'. "
-            "Activate a finished OD training run first."
-        )
-
-    crops_dir = run_dir / "crops"
-    crops_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = crops_dir / "manifest.jsonl"
-
-    records: list[dict] = []
-    skipped_no_box = 0
-    skipped_bad_image = 0
-
-    with manifest_path.open("w", encoding="utf-8") as manifest:
-        for i, (rel_path, genus) in enumerate(labeled, start=1):
-            if i % 100 == 0 or i == 1:
-                _log(logger, f"cropping {i}/{len(labeled)} …")
-
-            abs_path = IMAGES_DIR / rel_path
-            boxes = predict_top_box(model_path, abs_path)
-            if not boxes:
-                skipped_no_box += 1
-                continue
-
-            try:
-                with Image.open(abs_path) as img:
-                    rgb = img.convert("RGB")
-                    crop = crop_box_with_padding(rgb, boxes[0], BBOX_PADDING_FRACTION)
-            except (OSError, UnidentifiedImageError):
-                skipped_bad_image += 1
-                continue
-
-            out_name = crop_filename_for_source(rel_path)
-            out_rel = f"crops/{genus}/{out_name}"
-            out_abs = run_dir / out_rel
-            out_abs.parent.mkdir(parents=True, exist_ok=True)
-            crop.save(out_abs, format="JPEG", quality=95)
-
-            rec = {
-                "source_path": rel_path,
-                "genus": genus,
-                "crop_path": out_rel,
-            }
-            records.append(rec)
-            manifest.write(json.dumps(rec) + "\n")
-
-    _log(
-        logger,
-        f"crops done: kept={len(records)}, "
-        f"skipped_no_box={skipped_no_box}, skipped_bad_image={skipped_bad_image}",
-    )
-    return records
-
-
-def refilter_records_after_crop(
-    records: list[dict],
-    min_count: int,
-) -> list[dict]:
-    """Drop genera that fell below min_count after OD skips."""
-    counts = Counter(r["genus"] for r in records)
-    keep = {g for g, n in counts.items() if n >= min_count}
-    return [r for r in records if r["genus"] in keep]
+def labeled_to_records(labeled: list[tuple[str, str]]) -> list[dict]:
+    return [{"crop_path": path, "genus": genus} for path, genus in labeled]
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +223,6 @@ class FocalLoss:
         self.alpha = alpha
 
     def __call__(self, logits, targets):
-        import torch
         import torch.nn.functional as F
 
         log_probs = F.log_softmax(logits, dim=1)
@@ -372,13 +286,11 @@ def count_trainable(model) -> int:
 class CropDataset:
     def __init__(
         self,
-        run_dir: Path,
         records: list[dict],
         class_to_idx: dict[str, int],
         train: bool,
         img_size: int = IMG_SIZE,
     ):
-        self.run_dir = run_dir
         self.records = records
         self.class_to_idx = class_to_idx
         self.train = train
@@ -393,7 +305,7 @@ class CropDataset:
         import torch
 
         rec = self.records[index]
-        path = self.run_dir / rec["crop_path"]
+        path = PROCESSED_DIR / rec["crop_path"]
         with Image.open(path) as img:
             rgb = img.convert("RGB")
         if self.train:
@@ -462,8 +374,6 @@ def run_epochs(
     best_state: dict | None,
     best_f1: float,
 ) -> tuple[dict | None, float, int]:
-    import torch
-
     stale = 0
     last_epoch = 0
     for epoch in range(1, epochs + 1):
@@ -522,14 +432,20 @@ def train_model(
 
     label_map_path = run_dir / "label_map.json"
     label_map_path.write_text(
-        json.dumps({"class_to_idx": class_to_idx, "idx_to_class": {str(k): v for k, v in idx_to_class.items()}}, indent=2)
+        json.dumps(
+            {
+                "class_to_idx": class_to_idx,
+                "idx_to_class": {str(k): v for k, v in idx_to_class.items()},
+            },
+            indent=2,
+        )
         + "\n",
         encoding="utf-8",
     )
 
-    train_ds = CropDataset(run_dir, splits["train"], class_to_idx, train=True)
-    val_ds = CropDataset(run_dir, splits["val"], class_to_idx, train=False)
-    test_ds = CropDataset(run_dir, splits["test"], class_to_idx, train=False)
+    train_ds = CropDataset(splits["train"], class_to_idx, train=True)
+    val_ds = CropDataset(splits["val"], class_to_idx, train=False)
+    test_ds = CropDataset(splits["test"], class_to_idx, train=False)
 
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS
@@ -666,9 +582,16 @@ def main() -> None:
     if project is None:
         raise SystemExit(f"Project '{PROJECT}' not found in database")
 
-    rank = project.get("identification_rank")
+    rank = project["identification_rank"]
     if rank != "genus":
         print(f"warning: identification_rank is '{rank}', script trains genus labels")
+
+    processed_root = PROCESSED_DIR / PROJECT
+    if not processed_root.is_dir():
+        raise SystemExit(
+            f"No processed images at {processed_root}. "
+            "Run: uv run python scripts/crop_identification_images.py"
+        )
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = MODELS_DIR / PROJECT / "identification" / run_id
@@ -677,9 +600,10 @@ def main() -> None:
     logger = _setup_logging(run_dir)
     _log(logger, f"run_dir={run_dir}")
     _log(logger, f"project={PROJECT} identification_rank={rank}")
+    _log(logger, f"processed_dir={processed_root}")
 
     labeled = collect_labeled_paths(PROJECT)
-    _log(logger, f"harmonized images: {len(labeled)}")
+    _log(logger, f"harmonized processed images: {len(labeled)}")
     labeled = filter_by_min_count(labeled, MIN_IMAGES_PER_CLASS)
     genus_counts = Counter(g for _, g in labeled)
     _log(
@@ -688,32 +612,26 @@ def main() -> None:
         f"images={len(labeled)} genera={len(genus_counts)}",
     )
     if len(labeled) < 30 or len(genus_counts) < 2:
-        raise SystemExit("Not enough labeled images/classes to train")
+        raise SystemExit(
+            "Not enough labeled processed images/classes to train. "
+            "Run crop_identification_images.py first if crops are missing."
+        )
 
-    records = build_crop_dataset(PROJECT, run_dir, labeled, logger)
-    records = refilter_records_after_crop(records, MIN_IMAGES_PER_CLASS)
-    genus_counts = Counter(r["genus"] for r in records)
-    _log(
-        logger,
-        f"after crop + refilter: images={len(records)} genera={len(genus_counts)}",
-    )
-    if len(records) < 30 or len(genus_counts) < 2:
-        raise SystemExit("Not enough cropped images/classes to train")
+    records = labeled_to_records(labeled)
 
-    # Stratified split needs at least 2 samples per class for 3-way split;
-    # drop any class that is too small to stratify into train/val/test.
+    # Stratified split needs at least 2 samples per class for 3-way split.
     min_for_split = 3
     too_small = {g for g, n in genus_counts.items() if n < min_for_split}
     if too_small:
         records = [r for r in records if r["genus"] not in too_small]
-        _log(logger, f"dropped genera with <{min_for_split} crops: {sorted(too_small)}")
+        _log(logger, f"dropped genera with <{min_for_split} images: {sorted(too_small)}")
 
     splits = stratified_split(records, seed=SEED)
     splits_path = run_dir / "splits.json"
     splits_path.write_text(
         json.dumps(
             {
-                k: [{"source_path": r["source_path"], "genus": r["genus"], "crop_path": r["crop_path"]} for r in v]
+                k: [{"crop_path": r["crop_path"], "genus": r["genus"]} for r in v]
                 for k, v in splits.items()
             },
             indent=2,
