@@ -2,8 +2,9 @@
 Fetch observation photos from iNaturalist for FinBIF genera and species listed
 in taxa.json. One folder per taxon (Genus_species), files named <photo_id>.jpg.
 
-Looks up each FinBIF scientific name on the iNaturalist taxa API, then queries
-observations for the matching taxon id.
+Looks up each FinBIF scientific name and its synonyms on the iNaturalist taxa
+API, then queries observations for the matching taxon ids. Images are always
+saved under the FinBIF scientificName, not the synonym used for the query.
 
 API reference: https://api.inaturalist.org/v2/docs/
 Taxa lookup: https://api.inaturalist.org/v1/docs/#!/Taxa/get_taxa
@@ -133,10 +134,24 @@ def load_handled_taxa(path: Path) -> set[str]:
     return names
 
 
-def mark_taxon_handled(path: Path, scientific_name: str) -> None:
+def mark_taxon_handled(path: Path, names: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
-        f.write(scientific_name + "\n")
+        for name in names:
+            f.write(name + "\n")
+
+
+def query_names_for_taxon(scientific_name: str, synonyms: list[str]) -> list[str]:
+    names: list[str] = []
+    for name in [scientific_name, *synonyms]:
+        name = name.strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def pending_query_names(query_names: list[str], handled: set[str]) -> list[str]:
+    return [name for name in query_names if name not in handled]
 
 
 def load_finbif_taxa() -> list[dict]:
@@ -150,9 +165,15 @@ def load_finbif_taxa() -> list[dict]:
         name = (item.get("scientificName") or "").strip()
         if not name:
             continue
+        synonyms = []
+        for syn in item.get("synonyms") or []:
+            syn_name = (syn.get("scientificName") or "").strip()
+            if syn_name:
+                synonyms.append(syn_name)
         taxa.append({
             "scientific_name": name,
             "taxon_rank": item["taxonRank"],
+            "synonyms": synonyms,
         })
     print(f"Found {len(taxa)} genera and species")
     return taxa
@@ -210,11 +231,15 @@ def download_observation_photos(
     observations: list,
     existing_ids: set[int],
     seen_ids: set[int],
+    scientific_name: str,
 ) -> tuple[int, int, int]:
     downloaded = 0
     skipped = 0
     already_existed = 0
     photo_index = 0
+    folder = _folder_name(scientific_name)
+    out_dir = target_path / folder
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     while downloaded < MAX_IMAGES_PER_TAXON:
         had_photo_at_index = False
@@ -225,16 +250,6 @@ def download_observation_photos(
             had_photo_at_index = True
             photo = photos[photo_index]
 
-            taxon = obs.get("taxon") or {}
-            scientific = taxon.get("name")
-            if not scientific:
-                skipped += 1
-                continue
-
-            folder = _folder_name(scientific)
-            out_dir = target_path / folder
-            out_dir.mkdir(parents=True, exist_ok=True)
-
             if photo.get("url") is None:
                 skipped += 1
                 continue
@@ -242,22 +257,22 @@ def download_observation_photos(
             if photo_id is None:
                 skipped += 1
                 continue
-            if photo_id in existing_ids:
+            out_file = out_dir / f"{photo_id}.jpg"
+            if photo_id in existing_ids or out_file.is_file():
                 already_existed += 1
                 continue
             if photo_id in seen_ids:
                 continue
             seen_ids.add(photo_id)
 
-            out_file = out_dir / f"{photo_id}.jpg"
             large_url = _square_url_to_large(photo["url"])
-            print(f"Scientific name: {scientific}, photo {photo_id}")
+            print(f"Scientific name: {scientific_name}, photo {photo_id}")
             print(f"Downloading image from {large_url}, saving to {out_file}")
             out_file.write_bytes(_http_bytes(large_url))
             existing_ids.add(photo_id)
             downloaded += 1
 
-            sleep_sec = random.uniform(0.5, 2.5)
+            sleep_sec = random.uniform(1, 3)
             time.sleep(sleep_sec)
             print(f"Sleeping for {sleep_sec} seconds")
 
@@ -288,37 +303,53 @@ def main() -> None:
     for index, taxon in enumerate(taxa, start=1):
         name = taxon["scientific_name"]
         rank = taxon["taxon_rank"]
+        query_names = query_names_for_taxon(name, taxon.get("synonyms") or [])
+        pending_names = pending_query_names(query_names, handled)
         print(f"\n[{index}/{len(taxa)}] {name} ({rank})")
-        if name in handled:
+        print(f"Query names: {', '.join(query_names)}")
+        if not pending_names:
             print(f"Already handled, skipping")
             continue
+        print(f"Pending query names: {', '.join(pending_names)}")
 
-        taxon_id = lookup_inaturalist_taxon_id(name)
-        if taxon_id is None:
+        taxon_ids: list[int] = []
+        seen_taxon_ids: set[int] = set()
+        for query_name in pending_names:
+            taxon_id = lookup_inaturalist_taxon_id(query_name)
+            if taxon_id is None or taxon_id in seen_taxon_ids:
+                continue
+            seen_taxon_ids.add(taxon_id)
+            taxon_ids.append(taxon_id)
+
+        if not taxon_ids:
             unmatched += 1
-            mark_taxon_handled(handled_log_path, name)
-            handled.add(name)
+            mark_taxon_handled(handled_log_path, pending_names)
+            handled.update(pending_names)
             continue
 
-        print(f"Fetching observations for taxon_id={taxon_id}, radius={QUERY_PARAMS['radius']}")
-        observations = fetch_observations_for_taxon(taxon_id, rank)
+        observations = []
+        for taxon_id in taxon_ids:
+            print(f"Fetching observations for taxon_id={taxon_id}, radius={QUERY_PARAMS['radius']}")
+            batch = fetch_observations_for_taxon(taxon_id, rank)
+            print(f"Got {len(batch)} observations for taxon_id={taxon_id}")
+            observations.extend(batch)
         print(f"Got {len(observations)} observations for {name}")
         if observations:
             new, skip, existed = download_observation_photos(
-                observations, existing_ids, seen_ids
+                observations, existing_ids, seen_ids, name
             )
             downloaded += new
             skipped += skip
             already_existed += existed
 
-        mark_taxon_handled(handled_log_path, name)
-        handled.add(name)
+        mark_taxon_handled(handled_log_path, pending_names)
+        handled.update(pending_names)
 
     print(
         f"\nDone. Downloaded {downloaded} new images to {target_path}. "
         f"Already existed: {already_existed}. "
         f"No iNaturalist match: {unmatched}. "
-        f"Skipped (no taxon name / no photo): {skipped}."
+        f"Skipped (no photo): {skipped}."
     )
 
 

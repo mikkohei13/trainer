@@ -49,3 +49,6 @@ See AGENTS.md for the development principles and product constraints.
 
 - iNat observations often contain multiple nearly similar images of the same individual. These can cause leaking/overfitting. 
 - Quality model has trained on images that were first cropped using object detection model.
+
+- Check which taxa have many observations and few images, and why.
+  - Verdanus:

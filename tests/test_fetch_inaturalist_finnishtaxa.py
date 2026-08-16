@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import shutil
 import tempfile
 import unittest
@@ -87,7 +88,7 @@ class TestDownloadSkipsExistingIds(unittest.TestCase):
 
         with patch.object(fetch, "_http_bytes") as http_bytes:
             downloaded, skipped, already_existed = fetch.download_observation_photos(
-                observations, existing_ids, seen_ids
+                observations, existing_ids, seen_ids, "Cixius nervosus"
             )
 
         http_bytes.assert_not_called()
@@ -109,7 +110,7 @@ class TestDownloadSkipsExistingIds(unittest.TestCase):
         with patch.object(fetch, "_http_bytes", return_value=b"img") as http_bytes:
             with patch.object(fetch.time, "sleep"):
                 downloaded, skipped, already_existed = fetch.download_observation_photos(
-                    observations, existing_ids, seen_ids
+                    observations, existing_ids, seen_ids, "Cixius"
                 )
 
         http_bytes.assert_called_once()
@@ -139,7 +140,7 @@ class TestDownloadSkipsExistingIds(unittest.TestCase):
             with patch.object(fetch, "_http_bytes", return_value=b"img") as http_bytes:
                 with patch.object(fetch.time, "sleep"):
                     downloaded, skipped, already_existed = fetch.download_observation_photos(
-                        observations, existing_ids, seen_ids
+                        observations, existing_ids, seen_ids, "Cixius"
                     )
 
         self.assertEqual(http_bytes.call_count, 2)
@@ -180,7 +181,7 @@ class TestDownloadSkipsExistingIds(unittest.TestCase):
             with patch.object(fetch, "_http_bytes", return_value=b"img") as http_bytes:
                 with patch.object(fetch.time, "sleep"):
                     downloaded, skipped, already_existed = fetch.download_observation_photos(
-                        observations, existing_ids, seen_ids
+                        observations, existing_ids, seen_ids, "Cixius"
                     )
 
         self.assertEqual(http_bytes.call_count, 4)
@@ -194,6 +195,136 @@ class TestDownloadSkipsExistingIds(unittest.TestCase):
         self.assertTrue((self.tmp / "Cixius" / "11.jpg").is_file())
         self.assertFalse((self.tmp / "Cixius" / "12.jpg").exists())
         self.assertFalse((self.tmp / "Cixius" / "21.jpg").exists())
+
+    def test_saves_under_finbif_scientific_name_not_observation_taxon(self):
+        existing_ids: set[int] = set()
+        seen_ids: set[int] = set()
+        observations = [
+            {
+                "taxon": {"name": "Rosenus cruciatus"},
+                "photos": [{"id": 7, "url": "https://example.com/photos/7/square.jpg"}],
+            }
+        ]
+
+        with patch.object(fetch, "_http_bytes", return_value=b"img"):
+            with patch.object(fetch.time, "sleep"):
+                downloaded, skipped, already_existed = fetch.download_observation_photos(
+                    observations, existing_ids, seen_ids, "Rosenus laciniatus"
+                )
+
+        self.assertEqual(downloaded, 1)
+        self.assertEqual(skipped, 0)
+        self.assertEqual(already_existed, 0)
+        self.assertTrue((self.tmp / "Rosenus_laciniatus" / "7.jpg").is_file())
+        self.assertFalse((self.tmp / "Rosenus_cruciatus").exists())
+
+    def test_treats_file_in_finbif_folder_as_already_existing(self):
+        _touch(self.tmp / "Rosenus_laciniatus" / "7.jpg")
+        existing_ids: set[int] = set()
+        seen_ids: set[int] = set()
+        observations = [
+            {
+                "taxon": {"name": "Rosenus abiskoensis"},
+                "photos": [{"id": 7, "url": "https://example.com/photos/7/square.jpg"}],
+            }
+        ]
+
+        with patch.object(fetch, "_http_bytes") as http_bytes:
+            downloaded, skipped, already_existed = fetch.download_observation_photos(
+                observations, existing_ids, seen_ids, "Rosenus laciniatus"
+            )
+
+        http_bytes.assert_not_called()
+        self.assertEqual(downloaded, 0)
+        self.assertEqual(already_existed, 1)
+
+
+class TestQueryNamesForTaxon(unittest.TestCase):
+    def test_includes_scientific_name_then_unique_synonyms(self):
+        names = fetch.query_names_for_taxon(
+            "Rosenus laciniatus",
+            ["Rosenus cruciatus", "Rosenus abiskoensis", "Rosenus laciniatus"],
+        )
+        self.assertEqual(
+            names,
+            ["Rosenus laciniatus", "Rosenus cruciatus", "Rosenus abiskoensis"],
+        )
+
+    def test_skips_blank_synonyms(self):
+        names = fetch.query_names_for_taxon("Cixius", ["", "  "])
+        self.assertEqual(names, ["Cixius"])
+
+
+class TestPendingQueryNames(unittest.TestCase):
+    def test_skips_scientific_name_and_synonyms_already_in_log(self):
+        pending = fetch.pending_query_names(
+            ["Rosenus laciniatus", "Rosenus cruciatus", "Rosenus abiskoensis"],
+            {"Rosenus laciniatus", "Rosenus cruciatus"},
+        )
+        self.assertEqual(pending, ["Rosenus abiskoensis"])
+
+    def test_skips_taxon_when_all_query_names_are_handled(self):
+        pending = fetch.pending_query_names(
+            ["Rosenus laciniatus", "Rosenus cruciatus"],
+            {"Rosenus laciniatus", "Rosenus cruciatus", "Rosenus abiskoensis"},
+        )
+        self.assertEqual(pending, [])
+
+
+class TestLoadFinbifTaxaSynonyms(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self._orig_path = fetch.taxa_json_path
+        fetch.taxa_json_path = self.tmp / "taxa.json"
+
+    def tearDown(self):
+        fetch.taxa_json_path = self._orig_path
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_loads_synonym_scientific_names(self):
+        fetch.taxa_json_path.write_text(
+            json.dumps({
+                "results": [
+                    {
+                        "scientificName": "Rosenus laciniatus",
+                        "taxonRank": "MX.species",
+                        "synonyms": [
+                            {"scientificName": "Rosenus cruciatus"},
+                            {"scientificName": "Rosenus abiskoensis"},
+                        ],
+                    }
+                ]
+            }),
+            encoding="utf-8",
+        )
+
+        taxa = fetch.load_finbif_taxa()
+
+        self.assertEqual(len(taxa), 1)
+        self.assertEqual(taxa[0]["scientific_name"], "Rosenus laciniatus")
+        self.assertEqual(
+            taxa[0]["synonyms"],
+            ["Rosenus cruciatus", "Rosenus abiskoensis"],
+        )
+
+
+class TestMarkTaxonHandled(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_appends_all_query_names(self):
+        path = self.tmp / "handled.log"
+        fetch.mark_taxon_handled(
+            path,
+            ["Rosenus laciniatus", "Rosenus cruciatus", "Rosenus abiskoensis"],
+        )
+        self.assertEqual(
+            path.read_text(encoding="utf-8").splitlines(),
+            ["Rosenus laciniatus", "Rosenus cruciatus", "Rosenus abiskoensis"],
+        )
 
 
 if __name__ == "__main__":
