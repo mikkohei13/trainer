@@ -147,19 +147,18 @@ def evaluate_image(taxon: str):
     with Image.open(abs_image) as img:
         img_w, img_h = img.size
 
-    boxes = inference.predict_top_box(detection_model_path, abs_image)
+    boxes = inference.predict_boxes(detection_model_path, abs_image, conf=0.1)
     if not boxes:
         return jsonify({
-            "box": None,
+            "boxes": [],
             "quality_score": None,
             "img_w": img_w,
             "img_h": img_h,
         })
 
-    box = boxes[0]
-    score = inference.predict_quality_score(quality_model_path, abs_image, box)
+    score = inference.predict_quality_score(quality_model_path, abs_image, boxes[0])
     return jsonify({
-        "box": box,
+        "boxes": boxes,
         "quality_score": score,
         "img_w": img_w,
         "img_h": img_h,

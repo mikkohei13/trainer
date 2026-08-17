@@ -52,3 +52,9 @@ See AGENTS.md for the development principles and product constraints.
 
 - Check which taxa have many observations and few images, and why.
   - Verdanus:
+
+
+- Object detection model notes:
+  - No insect or non-Hemiptera: 0.36 and below
+  - If no insect found, run taxon identification on the whole image. This way failing OD won't hinder taxon identification.
+  - Quality model might be biased, giving higher values for brightly colored species than brown ones. So shoud not use it to categorically filter out images accross taxa.

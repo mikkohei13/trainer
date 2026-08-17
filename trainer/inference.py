@@ -25,14 +25,20 @@ def _get_yolo(model_path: Path):
     return _model_cache[key]
 
 
-def predict_top_box(model_path: Path, image_abs_path: Path) -> list[dict]:
+def predict_boxes(
+    model_path: Path,
+    image_abs_path: Path,
+    conf: float = 0.1,
+) -> list[dict]:
     """
-    Run detection and return at most one box (highest confidence) as
-    pixel-space x, y, w, h (top-left origin, matching Annotorious).
+    Run detection and return all boxes above `conf` as pixel-space
+    x, y, w, h (top-left origin, matching Annotorious) plus confidence.
+    Sorted by confidence descending.
     """
     model = _get_yolo(model_path)
     results = model.predict(
         source=str(image_abs_path),
+        conf=conf,
         verbose=False,
     )
     if not results:
@@ -47,11 +53,30 @@ def predict_top_box(model_path: Path, image_abs_path: Path) -> list[dict]:
     if confs is None or xyxy is None:
         return []
 
-    best_i = int(confs.argmax().item())
-    x1, y1, x2, y2 = xyxy[best_i].tolist()
-    w = x2 - x1
-    h = y2 - y1
-    return [{"x": float(x1), "y": float(y1), "w": float(w), "h": float(h)}]
+    out = []
+    for i in range(len(boxes)):
+        x1, y1, x2, y2 = xyxy[i].tolist()
+        out.append({
+            "x": float(x1),
+            "y": float(y1),
+            "w": float(x2 - x1),
+            "h": float(y2 - y1),
+            "conf": float(confs[i].item()),
+        })
+    out.sort(key=lambda b: b["conf"], reverse=True)
+    return out
+
+
+def predict_top_box(model_path: Path, image_abs_path: Path) -> list[dict]:
+    """
+    Run detection and return at most one box (highest confidence) as
+    pixel-space x, y, w, h (top-left origin, matching Annotorious).
+    """
+    boxes = predict_boxes(model_path, image_abs_path, conf=0.25)
+    if not boxes:
+        return []
+    top = boxes[0]
+    return [{"x": top["x"], "y": top["y"], "w": top["w"], "h": top["h"]}]
 
 
 def _get_quality_model(model_path: Path):

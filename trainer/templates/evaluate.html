@@ -55,6 +55,12 @@
     font-size: 0.9rem;
   }
 
+  .eval-conf {
+    font-size: 11px;
+    font-weight: 700;
+    font-family: system-ui, sans-serif;
+  }
+
   .score-badge {
     display: inline-block;
     font-weight: 600;
@@ -181,7 +187,8 @@
           return;
         }
 
-        if (!data.box) {
+        const boxes = Array.isArray(data.boxes) ? data.boxes : [];
+        if (boxes.length === 0) {
           statusEl.textContent = "No detection";
           return;
         }
@@ -196,13 +203,23 @@
         const offsetX = (renderW - drawnW) / 2;
         const offsetY = (renderH - drawnH) / 2;
 
-        const x = offsetX + (data.box.x / data.img_w) * drawnW;
-        const y = offsetY + (data.box.y / data.img_h) * drawnH;
-        const w = (data.box.w / data.img_w) * drawnW;
-        const h = (data.box.h / data.img_h) * drawnH;
-
         overlay.setAttribute("viewBox", `0 0 ${renderW} ${renderH}`);
-        overlay.innerHTML = `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="none" stroke="#22c55e" stroke-width="2"></rect>`;
+        overlay.innerHTML = boxes.map((box) => {
+          const x = offsetX + (box.x / data.img_w) * drawnW;
+          const y = offsetY + (box.y / data.img_h) * drawnH;
+          const w = (box.w / data.img_w) * drawnW;
+          const h = (box.h / data.img_h) * drawnH;
+          const conf = Number(box.conf);
+          const label = Number.isFinite(conf) ? conf.toFixed(2) : "";
+          const labelH = 16;
+          const labelW = 40;
+          const ly = y > labelH + 1 ? y - labelH : y;
+          return (
+            `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="none" stroke="#22c55e" stroke-width="2"></rect>` +
+            `<rect x="${x}" y="${ly}" width="${labelW}" height="${labelH}" fill="#22c55e"></rect>` +
+            `<text class="eval-conf" x="${x + 4}" y="${ly + 12}" fill="#052e16">${label}</text>`
+          );
+        }).join("");
 
         const score = Number(data.quality_score);
         const badgeCls = scoreClass(score);
