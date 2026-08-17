@@ -39,15 +39,9 @@ Open http://127.0.0.1:5001/ in a browser.
 uv run python -m unittest discover -s tests -v
 ```
 
-## Read more
+## Model training
 
-See ARCHITECTURE.md for the system architecture details.
-
-See AGENTS.md for the development principles and product constraints.
-
-## Notes
-
-### Image quality model training
+### Image quality model
 
 The app trains a quality regression model from manually rated images:
 
@@ -56,7 +50,36 @@ The app trains a quality regression model from manually rated images:
 3. The crops are split reproducibly into 80% training and 20% validation data. At least five usable images are required.
 4. A pretrained ResNet-18 is fine-tuned to predict a quality score between 0 and 1. Training keeps the model with the best validation RMSE and stops early when validation performance no longer improves.
 
-### Misc
+### Object detection model
+
+- todo
+
+### Taxon identification model
+
+Decoupled CLI (not in the web app).
+
+First harmonize taxonomy on the UI.
+
+```bash
+uv run python scripts/crop_identification_images.py
+uv run python scripts/train_identification.py
+```
+
+1. **Crop.** The project's active object-detection model finds the highest-confidence insect in each image under `trainer/images/<project>/`. The box is padded 10% and saved under `trainer/images_processed/<project>/` with the same folder layout. Originals are never modified. Existing crops are skipped; images with no detection are skipped.
+2. **Labels.** Folder names are mapped through `harmonization.tsv`. The class is the first word of the authoritative name (genus). Unmatched folders (e.g. `Non_insects`) are dropped. Genera with fewer than 10 crops are dropped.
+3. **Split.** Remaining crops are split 80/10/10 train/val/test, stratified by genus.
+4. **Train.** EfficientNetV2-S pretrained on ImageNet-21k. Inputs are letterboxed. Train-only augmentation. Focal Loss (γ=2) instead of cross-entropy because of class imbalance. Phase A freezes the backbone and trains the head; phase B unfreezes the last ~40 leaf modules, early stop on val macro-F1.
+5. **Output.** `trainer/models/<project>/identification/<run_id>/` contains `best.pt`, `metrics.json` (val/test top-1 and macro-F1), `splits.json`, `label_map.json`, and `train.log`.
+
+v1 does not yet address near-duplicate iNat photos leaking across splits, or imbalance beyond Focal Loss.
+
+## Read more
+
+See ARCHITECTURE.md for the system architecture details.
+
+See AGENTS.md for the development principles and product constraints.
+
+## Notes
 
 - iNat observations often contain multiple nearly similar images of the same individual. These can cause leaking/overfitting. 
 - Quality model has trained on images that were first cropped using object detection model.

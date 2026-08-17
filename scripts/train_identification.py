@@ -42,7 +42,7 @@ TEST_FRAC = 0.10
 SEED = 42
 
 IMG_SIZE = 224
-BATCH_SIZE = 64
+BATCH_SIZE = 256  # EfficientNetV2-S @ 224 is small; 256 fits easily in ~30GB
 HEAD_EPOCHS = 3
 FINETUNE_EPOCHS = 12
 UNFREEZE_LEAF_MODULES = 40  # within 30–60; later MBConv / classifier leaves
@@ -52,8 +52,14 @@ WEIGHT_DECAY = 1e-4
 FOCAL_GAMMA = 2.0
 FOCAL_ALPHA = 0.25
 PATIENCE = 4
+# Keep 0 when images are cached in RAM. DataLoader workers on MPS would copy
+# the cache per process and fight the GPU for unified memory.
 NUM_WORKERS = 0
+CACHE_IMAGES = True
 BASE_MODEL = "tf_efficientnetv2_s.in21k"
+
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_ROOT / "trainer" / "models"
@@ -210,6 +216,15 @@ def _train_augment(img: Image.Image) -> Image.Image:
     return img
 
 
+def _pil_to_normalized_tensor(img: Image.Image, img_size: int):
+    import torch
+
+    boxed = letterbox(img, img_size, fill=0)
+    arr = np.asarray(boxed, dtype=np.float32).transpose(2, 0, 1) / 255.0
+    arr = (arr - IMAGENET_MEAN) / IMAGENET_STD
+    return torch.from_numpy(arr)
+
+
 # ---------------------------------------------------------------------------
 # Focal loss / model helpers
 # ---------------------------------------------------------------------------
@@ -290,32 +305,62 @@ class CropDataset:
         class_to_idx: dict[str, int],
         train: bool,
         img_size: int = IMG_SIZE,
+        cache_images: bool = CACHE_IMAGES,
+        logger: logging.Logger | None = None,
     ):
         self.records = records
         self.class_to_idx = class_to_idx
         self.train = train
         self.img_size = img_size
-        self.mean = (0.485, 0.456, 0.406)
-        self.std = (0.229, 0.224, 0.225)
+        self.cache = None
+        if cache_images:
+            self.cache = self._build_cache(logger)
+
+    def _build_cache(self, logger: logging.Logger | None):
+        cached = []
+        n = len(self.records)
+        for i, rec in enumerate(self.records, start=1):
+            if logger and (i == 1 or i % 2000 == 0 or i == n):
+                split = "train" if self.train else "eval"
+                _log(logger, f"caching {split} images {i}/{n}")
+            path = PROCESSED_DIR / rec["crop_path"]
+            with Image.open(path) as img:
+                rgb = img.convert("RGB")
+                if self.train:
+                    cached.append(rgb.copy())
+                else:
+                    cached.append(_pil_to_normalized_tensor(rgb, self.img_size))
+        if logger:
+            split = "train" if self.train else "eval"
+            if self.train:
+                pixels = sum(im.width * im.height * 3 for im in cached)
+                _log(logger, f"cached {n} {split} RGB crops (~{pixels / 1e9:.2f} GB uncompressed)")
+            else:
+                _log(logger, f"cached {n} {split} tensors")
+        return cached
 
     def __len__(self) -> int:
         return len(self.records)
 
-    def __getitem__(self, index: int):
-        import torch
-
+    def _load_rgb(self, index: int) -> Image.Image:
+        if self.cache is not None:
+            return self.cache[index]
         rec = self.records[index]
-        path = PROCESSED_DIR / rec["crop_path"]
-        with Image.open(path) as img:
-            rgb = img.convert("RGB")
+        with Image.open(PROCESSED_DIR / rec["crop_path"]) as img:
+            return img.convert("RGB")
+
+    def __getitem__(self, index: int):
+        rec = self.records[index]
         if self.train:
+            rgb = self._load_rgb(index)
+            if self.cache is not None:
+                rgb = rgb.copy()
             rgb = _train_augment(rgb)
-        boxed = letterbox(rgb, self.img_size, fill=0)
-        arr = torch.from_numpy(
-            np.asarray(boxed, dtype=np.float32).transpose(2, 0, 1) / 255.0
-        )
-        for c in range(3):
-            arr[c] = (arr[c] - self.mean[c]) / self.std[c]
+            arr = _pil_to_normalized_tensor(rgb, self.img_size)
+        elif self.cache is not None:
+            arr = self.cache[index]
+        else:
+            arr = _pil_to_normalized_tensor(self._load_rgb(index), self.img_size)
         label = self.class_to_idx[rec["genus"]]
         return arr, label
 
@@ -443,9 +488,10 @@ def train_model(
         encoding="utf-8",
     )
 
-    train_ds = CropDataset(splits["train"], class_to_idx, train=True)
-    val_ds = CropDataset(splits["val"], class_to_idx, train=False)
-    test_ds = CropDataset(splits["test"], class_to_idx, train=False)
+    _log(logger, f"caching images in RAM (CACHE_IMAGES={CACHE_IMAGES})")
+    train_ds = CropDataset(splits["train"], class_to_idx, train=True, logger=logger)
+    val_ds = CropDataset(splits["val"], class_to_idx, train=False, logger=logger)
+    test_ds = CropDataset(splits["test"], class_to_idx, train=False, logger=logger)
 
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS
@@ -458,7 +504,11 @@ def train_model(
     )
 
     device = pick_device()
-    _log(logger, f"device={device}, num_classes={num_classes}, base_model={BASE_MODEL}")
+    _log(
+        logger,
+        f"device={device}, num_classes={num_classes}, "
+        f"batch_size={BATCH_SIZE}, base_model={BASE_MODEL}",
+    )
 
     model = timm.create_model(BASE_MODEL, pretrained=True, num_classes=num_classes)
     model = model.to(device)
