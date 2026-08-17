@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 from trainer import db
 from trainer.images import IMAGES_DIR, list_project_image_paths
@@ -107,21 +107,21 @@ def crop_project_images(project: str) -> None:
             continue
 
         abs_path = IMAGES_DIR / rel_path
-        boxes = predict_top_box(model_path, abs_path)
-        if not boxes:
-            skipped_no_box += 1
-            continue
-
         try:
+            boxes = predict_top_box(model_path, abs_path)
+            if not boxes:
+                skipped_no_box += 1
+                continue
+
             with Image.open(abs_path) as img:
                 rgb = img.convert("RGB")
                 crop = crop_box_with_padding(rgb, boxes[0], BBOX_PADDING_FRACTION)
-        except (OSError, UnidentifiedImageError) as exc:
-            print(f"skip bad image {rel_path}: {exc}")
+            save_crop(crop, out_abs)
+        except Exception as exc:
+            print(f"skip failed image {rel_path}: {exc}")
             skipped_bad += 1
             continue
 
-        save_crop(crop, out_abs)
         written += 1
 
     print(
