@@ -148,15 +148,11 @@ def evaluate_image(taxon: str):
         img_w, img_h = img.size
 
     boxes = inference.predict_boxes(detection_model_path, abs_image, conf=0.1)
-    if not boxes:
-        return jsonify({
-            "boxes": [],
-            "quality_score": None,
-            "img_w": img_w,
-            "img_h": img_h,
-        })
-
-    score = inference.predict_quality_score(quality_model_path, abs_image, boxes[0])
+    crop_box = inference.quality_crop_box(boxes)
+    if crop_box is None:
+        score = None
+    else:
+        score = inference.predict_quality_score(quality_model_path, abs_image, crop_box)
     return jsonify({
         "boxes": boxes,
         "quality_score": score,

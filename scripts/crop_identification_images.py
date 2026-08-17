@@ -29,7 +29,7 @@ BBOX_PADDING_FRACTION = 0.10
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROCESSED_DIR = PROJECT_ROOT / "trainer" / "images_processed"
 
-LIMIT = 1000
+LIMIT = 100000
 
 
 def crop_box_with_padding(img: Image.Image, box: dict, pad_frac: float) -> Image.Image:

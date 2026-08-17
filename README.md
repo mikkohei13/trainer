@@ -6,7 +6,7 @@ This is an application to manage the process of training ML image classification
 - Classify the images to remove images that are not insects (done)
 - Classify the images based on their quality, e.g. blurry, low resolution, etc. (done)
 - Classify the images based on their life stage, e.g. larva, pupa, adult, etc.
-- Harmonize taxon names to FinBIF accepted names
+- Harmonize taxon names to FinBIF accepted names (done)
 - Augment image data
 - Train a model to identify the insect species using a selection of the images
 - Evaluate the model performance
@@ -46,6 +46,17 @@ See ARCHITECTURE.md for the system architecture details.
 See AGENTS.md for the development principles and product constraints.
 
 ## Notes
+
+### Image quality model training
+
+The app trains a quality regression model from manually rated images:
+
+1. It uses the active object-detection model to locate insects in each rated image. Missing or unreadable images and images with no detection are skipped.
+2. If several insects or insect parts are detected, their boxes are combined. The resulting area is cropped with padding and resized for training.
+3. The crops are split reproducibly into 80% training and 20% validation data. At least five usable images are required.
+4. A pretrained ResNet-18 is fine-tuned to predict a quality score between 0 and 1. Training keeps the model with the best validation RMSE and stops early when validation performance no longer improves.
+
+### Misc
 
 - iNat observations often contain multiple nearly similar images of the same individual. These can cause leaking/overfitting. 
 - Quality model has trained on images that were first cropped using object detection model.

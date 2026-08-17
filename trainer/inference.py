@@ -12,6 +12,8 @@ try:
 except Exception:
     pass
 
+DETECTION_CONF_THRESHOLD = 0.4
+
 _model_cache: dict[str, object] = {}
 _quality_model_cache: dict[str, tuple[object, int, float]] = {}
 
@@ -77,6 +79,24 @@ def predict_top_box(model_path: Path, image_abs_path: Path) -> list[dict]:
         return []
     top = boxes[0]
     return [{"x": top["x"], "y": top["y"], "w": top["w"], "h": top["h"]}]
+
+
+def quality_crop_box(
+    boxes: list[dict],
+    conf: float = DETECTION_CONF_THRESHOLD,
+) -> dict | None:
+    kept = [b for b in boxes if float(b.get("conf", 0.0)) >= conf]
+    if not kept:
+        return None
+    return union_box(kept)
+
+
+def union_box(boxes: list[dict]) -> dict:
+    x1 = min(float(b["x"]) for b in boxes)
+    y1 = min(float(b["y"]) for b in boxes)
+    x2 = max(float(b["x"]) + float(b["w"]) for b in boxes)
+    y2 = max(float(b["y"]) + float(b["h"]) for b in boxes)
+    return {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}
 
 
 def _get_quality_model(model_path: Path):

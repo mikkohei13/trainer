@@ -242,7 +242,48 @@ class TestEvaluateImageApi(unittest.TestCase):
         mock_boxes.assert_called_once()
         self.assertEqual(mock_boxes.call_args.kwargs.get("conf"), 0.1)
         mock_quality.assert_called_once()
-        self.assertEqual(mock_quality.call_args[0][2], top)
+        self.assertEqual(
+            mock_quality.call_args[0][2],
+            {"x": 1.0, "y": 2.0, "w": 10.0, "h": 8.0},
+        )
+
+    @patch("trainer.routes.api.inference.predict_quality_score")
+    @patch("trainer.routes.api.inference.predict_boxes")
+    def test_evaluate_scores_union_of_confident_boxes(self, mock_boxes, mock_quality):
+        a = {"x": 10.0, "y": 20.0, "w": 30.0, "h": 40.0, "conf": 0.9}
+        b = {"x": 50.0, "y": 5.0, "w": 20.0, "h": 15.0, "conf": 0.5}
+        mock_boxes.return_value = [a, b]
+        mock_quality.return_value = 0.4
+
+        res = self.client.post(
+            "/api/projects/bugs/evaluate-image",
+            json={"image_path": self._img_rel},
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertEqual(data["boxes"], [a, b])
+        self.assertEqual(data["quality_score"], 0.4)
+        mock_quality.assert_called_once()
+        self.assertEqual(
+            mock_quality.call_args[0][2],
+            {"x": 10.0, "y": 5.0, "w": 60.0, "h": 55.0},
+        )
+
+    @patch("trainer.routes.api.inference.predict_quality_score")
+    @patch("trainer.routes.api.inference.predict_boxes")
+    def test_evaluate_quality_none_when_only_low_confidence_boxes(self, mock_boxes, mock_quality):
+        low = {"x": 1.0, "y": 2.0, "w": 10.0, "h": 8.0, "conf": 0.22}
+        mock_boxes.return_value = [low]
+
+        res = self.client.post(
+            "/api/projects/bugs/evaluate-image",
+            json={"image_path": self._img_rel},
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertEqual(data["boxes"], [low])
+        self.assertIsNone(data["quality_score"])
+        mock_quality.assert_not_called()
 
     @patch("trainer.routes.api.inference.predict_quality_score")
     @patch("trainer.routes.api.inference.predict_boxes")
