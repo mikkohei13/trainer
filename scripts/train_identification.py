@@ -1,5 +1,5 @@
 """
-Train a genus identification model for a project (v1, decoupled CLI).
+Train a genus identification model for a project (v2, decoupled CLI).
 
 Expects OD-cropped images from scripts/crop_identification_images.py under
 trainer/images_processed/<project>/ (same layout as trainer/images/).
@@ -41,17 +41,20 @@ VAL_FRAC = 0.10
 TEST_FRAC = 0.10
 SEED = 42
 
-IMG_SIZE = 224
-BATCH_SIZE = 256  # EfficientNetV2-S @ 224 is small; 256 fits easily in ~30GB
-HEAD_EPOCHS = 3
-FINETUNE_EPOCHS = 12
-UNFREEZE_LEAF_MODULES = 40  # within 30–60; later MBConv / classifier leaves
+IMG_SIZE = 384
+BATCH_SIZE = 128  # drop to 64 if MPS runs out of memory at 384
+HEAD_EPOCHS = 5
+FINETUNE_EPOCHS = 60
+UNFREEZE_LEAF_MODULES = 60  # later MBConv blocks; keep head unfrozen too
 LR_HEAD = 1e-3
-LR_FINETUNE = 1e-4
+LR_FINETUNE_HEAD = 1e-4
+LR_FINETUNE_BACKBONE = 1e-5
+LR_FINETUNE_MIN = 1e-6
 WEIGHT_DECAY = 1e-4
 FOCAL_GAMMA = 2.0
 FOCAL_ALPHA = 0.25
-PATIENCE = 4
+PATIENCE = 8
+WORST_CLASSES_TO_LOG = 20
 # Keep 0 when images are cached in RAM. DataLoader workers on MPS would copy
 # the cache per process and fight the GPU for unified memory.
 NUM_WORKERS = 0
@@ -156,6 +159,13 @@ def labeled_to_records(labeled: list[tuple[str, str]]) -> list[dict]:
     return [{"crop_path": path, "genus": genus} for path, genus in labeled]
 
 
+def inverse_sqrt_sample_weights(records: list[dict]) -> list[float]:
+    """Per-example weights 1/sqrt(n_class). Softens 10–1000× imbalance vs 1/n."""
+    counts = Counter(r["genus"] for r in records)
+    class_w = {g: 1.0 / (n ** 0.5) for g, n in counts.items()}
+    return [class_w[r["genus"]] for r in records]
+
+
 # ---------------------------------------------------------------------------
 # Split
 # ---------------------------------------------------------------------------
@@ -204,15 +214,24 @@ def letterbox(img: Image.Image, size: int, fill: int = 0) -> Image.Image:
 
 
 def _train_augment(img: Image.Image) -> Image.Image:
-    angle = random.choice([0, 90, 180, 270])
-    if angle:
-        img = img.rotate(angle, expand=True)
+    if random.random() < 0.5:
+        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+    angle90 = random.choice([0, 90, 180, 270])
+    if angle90:
+        img = img.rotate(angle90, expand=True)
+    small = random.uniform(-30.0, 30.0)
+    if abs(small) > 0.5:
+        img = img.rotate(small, expand=True, fillcolor=(0, 0, 0))
+    scale = random.uniform(0.85, 1.15)
+    if abs(scale - 1.0) > 0.01:
+        w, h = img.size
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
     if random.random() < 0.8:
-        factor = random.uniform(0.7, 1.3)
-        img = ImageEnhance.Brightness(img).enhance(factor)
+        img = ImageEnhance.Brightness(img).enhance(random.uniform(0.7, 1.3))
     if random.random() < 0.8:
-        factor = random.uniform(0.7, 1.3)
-        img = ImageEnhance.Contrast(img).enhance(factor)
+        img = ImageEnhance.Contrast(img).enhance(random.uniform(0.7, 1.3))
+    if random.random() < 0.8:
+        img = ImageEnhance.Color(img).enhance(random.uniform(0.7, 1.3))
     return img
 
 
@@ -377,7 +396,28 @@ def _macro_f1(y_true: list[int], y_pred: list[int], num_classes: int) -> float:
     return sum(f1s) / num_classes if num_classes else 0.0
 
 
-def evaluate(model, loader, criterion, device, num_classes: int) -> dict:
+def worst_class_recalls(
+    y_true: list[int],
+    y_pred: list[int],
+    idx_to_class: dict[int, str],
+    k: int = WORST_CLASSES_TO_LOG,
+) -> list[dict]:
+    rows = []
+    for c, name in idx_to_class.items():
+        support = sum(1 for t in y_true if t == c)
+        tp = sum(1 for t, p in zip(y_true, y_pred) if t == c and p == c)
+        recall = tp / support if support else 0.0
+        rows.append({"genus": name, "recall": recall, "support": support})
+    rows.sort(key=lambda r: (r["recall"], r["genus"]))
+    return rows[:k]
+
+
+def _log_worst_recalls(logger: logging.Logger, split: str, rows: list[dict]) -> None:
+    parts = [f"{r['genus']}={r['recall']:.2f}(n={r['support']})" for r in rows]
+    _log(logger, f"worst {len(rows)} {split} recalls: " + ", ".join(parts))
+
+
+def evaluate(model, loader, criterion, device, num_classes: int) -> tuple[dict, list[int], list[int]]:
     import torch
 
     model.eval()
@@ -397,11 +437,57 @@ def evaluate(model, loader, criterion, device, num_classes: int) -> dict:
             y_true.extend(y.cpu().tolist())
             y_pred.extend(pred.cpu().tolist())
     top1 = sum(1 for t, p in zip(y_true, y_pred) if t == p) / n if n else 0.0
-    return {
+    metrics = {
         "loss": loss_sum / n if n else 0.0,
         "top1": top1,
         "macro_f1": _macro_f1(y_true, y_pred, num_classes),
     }
+    return metrics, y_true, y_pred
+
+
+def _hyperparams() -> dict:
+    return {
+        "batch_size": BATCH_SIZE,
+        "img_size": IMG_SIZE,
+        "head_epochs": HEAD_EPOCHS,
+        "finetune_epochs": FINETUNE_EPOCHS,
+        "unfreeze_leaf_modules": UNFREEZE_LEAF_MODULES,
+        "lr_head": LR_HEAD,
+        "lr_finetune_head": LR_FINETUNE_HEAD,
+        "lr_finetune_backbone": LR_FINETUNE_BACKBONE,
+        "lr_finetune_min": LR_FINETUNE_MIN,
+        "weight_decay": WEIGHT_DECAY,
+        "focal_gamma": FOCAL_GAMMA,
+        "focal_alpha": FOCAL_ALPHA,
+        "patience": PATIENCE,
+        "seed": SEED,
+        "sampler": "inverse_sqrt",
+    }
+
+
+def save_best_checkpoint(
+    path: Path,
+    model,
+    class_to_idx: dict[str, int],
+    idx_to_class: dict[int, str],
+    val_metrics: dict,
+    test_metrics: dict | None = None,
+) -> None:
+    import torch
+
+    payload = {
+        "state_dict": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+        "class_to_idx": class_to_idx,
+        "idx_to_class": idx_to_class,
+        "base_model": BASE_MODEL,
+        "img_size": IMG_SIZE,
+        "project": PROJECT,
+        "hyperparams": _hyperparams(),
+        "val_metrics": val_metrics,
+    }
+    if test_metrics is not None:
+        payload["test_metrics"] = test_metrics
+    torch.save(payload, path)
 
 
 def run_epochs(
@@ -418,6 +504,10 @@ def run_epochs(
     phase: str,
     best_state: dict | None,
     best_f1: float,
+    scheduler=None,
+    run_dir: Path | None = None,
+    class_to_idx: dict[str, int] | None = None,
+    idx_to_class: dict[int, str] | None = None,
 ) -> tuple[dict | None, float, int]:
     stale = 0
     last_epoch = 0
@@ -437,20 +527,37 @@ def run_epochs(
             loss_sum += float(loss.item()) * x.size(0)
             n += x.size(0)
 
+        if scheduler is not None:
+            scheduler.step()
+
         train_loss = loss_sum / n if n else 0.0
-        val_metrics = evaluate(model, val_loader, criterion, device, num_classes)
+        val_metrics, _, _ = evaluate(model, val_loader, criterion, device, num_classes)
+        lr_msg = ""
+        if scheduler is not None:
+            lrs = [g["lr"] for g in optimizer.param_groups]
+            lr_msg = " " + " ".join(f"lr{i}={lr:.2e}" for i, lr in enumerate(lrs))
         _log(
             logger,
             f"[{phase}] epoch {epoch}/{epochs} "
             f"train_loss={train_loss:.4f} "
             f"val_loss={val_metrics['loss']:.4f} "
             f"val_top1={val_metrics['top1']:.4f} "
-            f"val_macro_f1={val_metrics['macro_f1']:.4f}",
+            f"val_macro_f1={val_metrics['macro_f1']:.4f}"
+            f"{lr_msg}",
         )
 
         if val_metrics["macro_f1"] > best_f1:
             best_f1 = val_metrics["macro_f1"]
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            if run_dir is not None and class_to_idx is not None and idx_to_class is not None:
+                save_best_checkpoint(
+                    run_dir / "best.pt",
+                    model,
+                    class_to_idx,
+                    idx_to_class,
+                    val_metrics,
+                )
+                _log(logger, f"[{phase}] saved best.pt (val_macro_f1={best_f1:.4f})")
             stale = 0
         else:
             stale += 1
@@ -467,7 +574,7 @@ def train_model(
     logger: logging.Logger,
 ) -> dict:
     import torch
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, WeightedRandomSampler
     import timm
 
     genera = sorted({r["genus"] for split in splits.values() for r in split})
@@ -493,8 +600,16 @@ def train_model(
     val_ds = CropDataset(splits["val"], class_to_idx, train=False, logger=logger)
     test_ds = CropDataset(splits["test"], class_to_idx, train=False, logger=logger)
 
+    sample_weights = inverse_sqrt_sample_weights(splits["train"])
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+    _log(logger, "train sampler=inverse_sqrt (WeightedRandomSampler)")
+
     train_loader = DataLoader(
-        train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS
+        train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=NUM_WORKERS
     )
     val_loader = DataLoader(
         val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS
@@ -507,12 +622,18 @@ def train_model(
     _log(
         logger,
         f"device={device}, num_classes={num_classes}, "
-        f"batch_size={BATCH_SIZE}, base_model={BASE_MODEL}",
+        f"batch_size={BATCH_SIZE}, img_size={IMG_SIZE}, base_model={BASE_MODEL}",
     )
 
     model = timm.create_model(BASE_MODEL, pretrained=True, num_classes=num_classes)
     model = model.to(device)
     criterion = FocalLoss(gamma=FOCAL_GAMMA, alpha=FOCAL_ALPHA)
+
+    epoch_kwargs = {
+        "run_dir": run_dir,
+        "class_to_idx": class_to_idx,
+        "idx_to_class": idx_to_class,
+    }
 
     # Phase A: head only
     freeze_all(model)
@@ -537,9 +658,10 @@ def train_model(
         "head",
         None,
         -1.0,
+        **epoch_kwargs,
     )
 
-    # Phase B: unfreeze last leaf modules
+    # Phase B: unfreeze last leaf modules; lower LR on backbone than head
     freeze_all(model)
     n_unfrozen = unfreeze_last_leaf_modules(model, UNFREEZE_LEAF_MODULES)
     unfreeze_classifier(model)
@@ -551,10 +673,22 @@ def train_model(
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    head_params = list(model.get_classifier().parameters())
+    head_ids = {id(p) for p in head_params}
+    backbone_params = [
+        p for p in model.parameters() if p.requires_grad and id(p) not in head_ids
+    ]
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=LR_FINETUNE,
+        [
+            {"params": backbone_params, "lr": LR_FINETUNE_BACKBONE},
+            {"params": head_params, "lr": LR_FINETUNE_HEAD},
+        ],
         weight_decay=WEIGHT_DECAY,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=FINETUNE_EPOCHS,
+        eta_min=LR_FINETUNE_MIN,
     )
     best_state, best_f1, _ = run_epochs(
         model,
@@ -570,51 +704,49 @@ def train_model(
         "finetune",
         best_state,
         best_f1,
+        scheduler=scheduler,
+        **epoch_kwargs,
     )
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    val_metrics = evaluate(model, val_loader, criterion, device, num_classes)
-    test_metrics = evaluate(model, test_loader, criterion, device, num_classes)
+    val_metrics, val_true, val_pred = evaluate(
+        model, val_loader, criterion, device, num_classes
+    )
+    test_metrics, test_true, test_pred = evaluate(
+        model, test_loader, criterion, device, num_classes
+    )
+    val_worst = worst_class_recalls(val_true, val_pred, idx_to_class)
+    test_worst = worst_class_recalls(test_true, test_pred, idx_to_class)
     _log(
         logger,
         f"final val_top1={val_metrics['top1']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
         f"test_top1={test_metrics['top1']:.4f} test_macro_f1={test_metrics['macro_f1']:.4f}",
     )
+    _log_worst_recalls(logger, "val", val_worst)
+    _log_worst_recalls(logger, "test", test_worst)
 
-    ckpt = {
-        "state_dict": model.state_dict(),
-        "class_to_idx": class_to_idx,
-        "idx_to_class": idx_to_class,
-        "base_model": BASE_MODEL,
-        "img_size": IMG_SIZE,
-        "project": PROJECT,
-        "hyperparams": {
-            "batch_size": BATCH_SIZE,
-            "head_epochs": HEAD_EPOCHS,
-            "finetune_epochs": FINETUNE_EPOCHS,
-            "unfreeze_leaf_modules": UNFREEZE_LEAF_MODULES,
-            "lr_head": LR_HEAD,
-            "lr_finetune": LR_FINETUNE,
-            "weight_decay": WEIGHT_DECAY,
-            "focal_gamma": FOCAL_GAMMA,
-            "focal_alpha": FOCAL_ALPHA,
-            "seed": SEED,
-        },
-        "val_metrics": val_metrics,
-        "test_metrics": test_metrics,
-    }
-    torch.save(ckpt, run_dir / "best.pt")
+    save_best_checkpoint(
+        run_dir / "best.pt",
+        model,
+        class_to_idx,
+        idx_to_class,
+        val_metrics,
+        test_metrics=test_metrics,
+    )
 
     metrics = {
         "val": val_metrics,
         "test": test_metrics,
+        "val_worst_recall": val_worst,
+        "test_worst_recall": test_worst,
         "num_classes": num_classes,
         "num_train": len(splits["train"]),
         "num_val": len(splits["val"]),
         "num_test": len(splits["test"]),
         "best_val_macro_f1": best_f1,
+        "hyperparams": _hyperparams(),
     }
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
     return metrics

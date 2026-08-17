@@ -138,5 +138,26 @@ class TestListProcessed(unittest.TestCase):
         self.assertEqual(paths, ["bugs/col/Genus_sp/a.jpg"])
 
 
+class TestInverseSqrtWeights(unittest.TestCase):
+    def test_rarer_class_gets_higher_weight(self):
+        records = [{"genus": "A"}] * 100 + [{"genus": "B"}] * 4
+        weights = tid.inverse_sqrt_sample_weights(records)
+        self.assertGreater(weights[-1], weights[0])
+        self.assertAlmostEqual(weights[0], 1.0 / (100 ** 0.5))
+        self.assertAlmostEqual(weights[-1], 1.0 / (4 ** 0.5))
+
+
+class TestWorstClassRecalls(unittest.TestCase):
+    def test_orders_by_recall(self):
+        idx_to_class = {0: "Alpha", 1: "Beta"}
+        y_true = [0, 0, 1, 1]
+        y_pred = [0, 0, 1, 0]
+        rows = tid.worst_class_recalls(y_true, y_pred, idx_to_class, k=2)
+        self.assertEqual(rows[0]["genus"], "Beta")
+        self.assertAlmostEqual(rows[0]["recall"], 0.5)
+        self.assertEqual(rows[1]["genus"], "Alpha")
+        self.assertAlmostEqual(rows[1]["recall"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

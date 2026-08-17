@@ -68,10 +68,10 @@ uv run python scripts/train_identification.py
 1. **Crop.** The project's active object-detection model finds the highest-confidence insect in each image under `trainer/images/<project>/`. The box is padded 10% and saved under `trainer/images_processed/<project>/` with the same folder layout. Originals are never modified. Existing crops are skipped; images with no detection are skipped.
 2. **Labels.** Folder names are mapped through `harmonization.tsv`. The class is the first word of the authoritative name (genus). Unmatched folders (e.g. `Non_insects`) are dropped. Genera with fewer than 10 crops are dropped.
 3. **Split.** Remaining crops are split 80/10/10 train/val/test, stratified by genus.
-4. **Train.** EfficientNetV2-S pretrained on ImageNet-21k. Inputs are letterboxed. Train-only augmentation. Focal Loss (γ=2) instead of cross-entropy because of class imbalance. Phase A freezes the backbone and trains the head; phase B unfreezes the last ~40 leaf modules, early stop on val macro-F1.
-5. **Output.** `trainer/models/<project>/identification/<run_id>/` contains `best.pt`, `metrics.json` (val/test top-1 and macro-F1), `splits.json`, `label_map.json`, and `train.log`.
+4. **Train.** EfficientNetV2-S pretrained on ImageNet-21k. Inputs are letterboxed to 384×384. Train-only augmentation: flip, 90° multiples plus ±30° rotation, mild scale, brightness/contrast/saturation. Focal Loss (γ=2) plus inverse-sqrt class sampling. Phase A trains the head only; phase B unfreezes the last 60 leaf modules with a lower backbone LR than the head and a cosine LR decay. Early stop on val macro-F1; `best.pt` is written whenever it improves. Logs the 20 genera with worst recall.
+5. **Output.** `trainer/models/<project>/identification/<run_id>/` contains `best.pt`, `metrics.json` (val/test top-1, macro-F1, worst-class recalls), `splits.json`, `label_map.json`, and `train.log`.
 
-v1 does not yet address near-duplicate iNat photos leaking across splits, or imbalance beyond Focal Loss.
+Does not yet split by observation, so near-duplicate iNat photos can leak across splits.
 
 ## Read more
 
@@ -81,7 +81,7 @@ See AGENTS.md for the development principles and product constraints.
 
 ## Notes
 
-- iNat observations often contain multiple nearly similar images of the same individual. These can cause leaking/overfitting. 
+- iNat observations often contain multiple nearly similar images of the same individual. These can cause leaking/overfitting. Todo: for first taxa, remove images and download again, since now the script takes images accross observations.
 - Quality model has trained on images that were first cropped using object detection model.
 
 - Check which taxa have many observations and few images, and why.
