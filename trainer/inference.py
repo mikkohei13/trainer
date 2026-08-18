@@ -99,6 +99,16 @@ def union_box(boxes: list[dict]) -> dict:
     return {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}
 
 
+def _quality_device():
+    import torch
+
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def _get_quality_model(model_path: Path):
     key = str(model_path.resolve())
     if key in _quality_model_cache:
@@ -108,7 +118,7 @@ def _get_quality_model(model_path: Path):
     from torch import nn
     from torchvision import models
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _quality_device()
     checkpoint = torch.load(key, map_location=device)
 
     model = models.resnet18(weights=None)
@@ -146,18 +156,22 @@ def _crop_box_with_padding(img: Image.Image, box: dict, pad_frac: float) -> Imag
     return img.crop((left, top, right, bottom))
 
 
-def predict_quality_score(model_path: Path, image_abs_path: Path, box: dict) -> float:
-    import torch
+def _quality_transform(img_size: int):
     from torchvision.transforms import Compose, Normalize, Resize, ToTensor
 
-    model, img_size, padding_fraction = _get_quality_model(model_path)
-    device = next(model.parameters()).device
-
-    transform = Compose([
+    return Compose([
         Resize((img_size, img_size)),
         ToTensor(),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
+
+
+def predict_quality_score(model_path: Path, image_abs_path: Path, box: dict) -> float:
+    import torch
+
+    model, img_size, padding_fraction = _get_quality_model(model_path)
+    device = next(model.parameters()).device
+    transform = _quality_transform(img_size)
 
     with Image.open(image_abs_path) as img:
         rgb = img.convert("RGB")
@@ -167,3 +181,38 @@ def predict_quality_score(model_path: Path, image_abs_path: Path, box: dict) -> 
     with torch.no_grad():
         y = model(x).squeeze(1).item()
     return float(y)
+
+
+def predict_quality_on_crop(model_path: Path, crop_abs_path: Path) -> float:
+    """Score an already-cropped image (no extra pad)."""
+    return predict_quality_on_crops(model_path, [crop_abs_path])[0]
+
+
+def predict_quality_on_crops(
+    model_path: Path,
+    crop_abs_paths: list[Path],
+    batch_size: int = 32,
+) -> list[float]:
+    """Score already-cropped images (no extra pad)."""
+    import torch
+
+    if not crop_abs_paths:
+        return []
+
+    model, img_size, _padding_fraction = _get_quality_model(model_path)
+    device = next(model.parameters()).device
+    transform = _quality_transform(img_size)
+
+    scores: list[float] = []
+    for start in range(0, len(crop_abs_paths), batch_size):
+        chunk = crop_abs_paths[start:start + batch_size]
+        tensors = []
+        for path in chunk:
+            with Image.open(path) as img:
+                rgb = img.convert("RGB")
+            tensors.append(transform(rgb))
+        x = torch.stack(tensors, dim=0).to(device)
+        with torch.no_grad():
+            y = model(x).squeeze(1)
+        scores.extend(float(v) for v in y.detach().cpu().tolist())
+    return scores

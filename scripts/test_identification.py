@@ -20,7 +20,7 @@ from trainer.images import IMAGE_EXTS
 from trainer.inference import predict_top_box
 
 PROJECT = "auchenorrhyncha"
-RUN_ID = "20260817-231140"
+RUN_ID = "20260817-235733"
 TOP_K = 5
 BBOX_PADDING_FRACTION = 0.10
 
