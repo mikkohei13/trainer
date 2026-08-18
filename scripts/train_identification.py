@@ -1,5 +1,5 @@
 """
-Train a genus identification model for a project (v3, decoupled CLI).
+Train a genus identification model for a project (v2, decoupled CLI).
 
 Expects OD-cropped images from scripts/crop_identification_images.py under
 trainer/images_processed/<project>/ (same layout as trainer/images/).
@@ -11,26 +11,15 @@ Hardcoded parameters — edit constants below, then:
 
 Never modifies originals under trainer/images/. Training artifacts go to
 trainer/models/<project>/identification/<run_id>/.
-
-Quality: scores processed crops with the active quality model (cached),
-drops quality < 0.3, and keeps a rarity-dependent fraction of the
-highest-quality train images per genus. Checkpoints on HQ val macro-F1
-(quality > 0.7), matching typical inference photos.
-
-Cheap curriculum to try only if this run overfits HQ val while all-set
-train loss crashes: run the 5-epoch head phase on quality > 0.7 only
-(plus each class's best remaining image so no class is missing), then
-finetune on the keep-fraction set.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import math
 import random
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -56,7 +45,7 @@ SEED = 42
 # Evaluation image size (used for val/test).
 IMG_SIZE = 384
 # Training image size (used for train, to speed up CPU augmentation + training).
-TRAIN_IMG_SIZE = 320
+TRAIN_IMG_SIZE = 384
 BATCH_SIZE = 128  # drop to 64 if MPS runs out of memory at 384
 HEAD_EPOCHS = 5
 FINETUNE_EPOCHS = 60
@@ -80,13 +69,6 @@ CACHE_IMAGES = True
 CACHE_TRAIN_RESIZE_FACTOR = 1.2
 CACHE_EVAL_AS_UINT8 = True
 BASE_MODEL = "tf_efficientnetv2_s.in21k"
-
-QUALITY_FLOOR = 0.3
-QUALITY_HQ = 0.7
-KEEP_FRAC_RARE = 1.0
-KEEP_FRAC_COMMON = 0.30
-QUALITY_SCORE_BATCH = 32
-QUALITY_CACHE_FLUSH_EVERY = 500
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
@@ -194,254 +176,6 @@ def inverse_sqrt_sample_weights(records: list[dict]) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# Quality scores and train selection
-# ---------------------------------------------------------------------------
-
-
-def quality_scores_path(project: str) -> Path:
-    return MODELS_DIR / project / "identification" / "quality_scores.json"
-
-
-def load_quality_scores(path: Path) -> dict[str, float]:
-    if not path.is_file():
-        return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return {str(k): float(v) for k, v in data.items()}
-
-
-def write_quality_scores(path: Path, scores: dict[str, float]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(scores, indent=2) + "\n", encoding="utf-8")
-
-
-def score_processed_crops(
-    project: str,
-    crop_paths: list[str],
-    logger: logging.Logger,
-) -> dict[str, float]:
-    """Score processed crops with the active quality model; skip cached paths."""
-    from trainer.inference import predict_quality_on_crop, predict_quality_on_crops
-
-    model_path = db.get_active_quality_model_path_for_taxon(project)
-    if model_path is None:
-        raise SystemExit(
-            f"No active quality model for project '{project}'. "
-            "Activate a finished quality training run first."
-        )
-
-    cache_path = quality_scores_path(project)
-    scores = load_quality_scores(cache_path)
-    missing = [p for p in crop_paths if p not in scores]
-    _log(
-        logger,
-        f"quality scores cache={cache_path} cached={len(scores)} missing={len(missing)} "
-        f"model={model_path}",
-    )
-    if not missing:
-        return scores
-
-    scored_since_flush = 0
-    n = len(missing)
-    for start in range(0, n, QUALITY_SCORE_BATCH):
-        chunk = missing[start:start + QUALITY_SCORE_BATCH]
-        abs_paths = [PROCESSED_DIR / p for p in chunk]
-        i = start + len(chunk)
-        if i == len(chunk) or i % 500 == 0 or i == n:
-            _log(logger, f"scoring crops {i}/{n}")
-        try:
-            chunk_scores = predict_quality_on_crops(
-                model_path, abs_paths, batch_size=QUALITY_SCORE_BATCH
-            )
-            for rel, score in zip(chunk, chunk_scores):
-                scores[rel] = float(score)
-            scored_since_flush += len(chunk)
-        except Exception as exc:
-            _log(logger, f"batch score failed ({exc}); scoring one by one")
-            for rel, abs_path in zip(chunk, abs_paths):
-                try:
-                    scores[rel] = float(predict_quality_on_crop(model_path, abs_path))
-                    scored_since_flush += 1
-                except Exception as one_exc:
-                    _log(logger, f"skip quality score {rel}: {one_exc}")
-        if scored_since_flush >= QUALITY_CACHE_FLUSH_EVERY:
-            write_quality_scores(cache_path, scores)
-            scored_since_flush = 0
-
-    write_quality_scores(cache_path, scores)
-    return scores
-
-
-def attach_quality(
-    records: list[dict],
-    scores: dict[str, float],
-) -> tuple[list[dict], int]:
-    """Copy quality onto records. Drops paths with no score. Returns (out, n_dropped)."""
-    out = []
-    dropped = 0
-    for rec in records:
-        score = scores.get(rec["crop_path"])
-        if score is None:
-            dropped += 1
-            continue
-        item = dict(rec)
-        item["quality"] = float(score)
-        out.append(item)
-    return out, dropped
-
-
-def quality_histogram(records: list[dict]) -> dict[str, int]:
-    bins = {"<0.3": 0, "0.3-0.7": 0, ">0.7": 0}
-    for rec in records:
-        q = float(rec["quality"])
-        if q < QUALITY_FLOOR:
-            bins["<0.3"] += 1
-        elif q > QUALITY_HQ:
-            bins[">0.7"] += 1
-        else:
-            bins["0.3-0.7"] += 1
-    return bins
-
-
-def drop_below_quality_floor(
-    records: list[dict],
-    floor: float = QUALITY_FLOOR,
-) -> list[dict]:
-    return [r for r in records if float(r["quality"]) >= floor]
-
-
-def keep_frac_for_count(
-    n: int,
-    n_min: int,
-    n_max: int,
-    frac_rare: float = KEEP_FRAC_RARE,
-    frac_common: float = KEEP_FRAC_COMMON,
-) -> float:
-    """Log-interpolate keep fraction: rarest → frac_rare, most common → frac_common."""
-    if n <= 0:
-        return frac_rare
-    if n_max <= n_min:
-        return frac_rare
-    t = (math.log(n) - math.log(n_min)) / (math.log(n_max) - math.log(n_min))
-    t = min(1.0, max(0.0, t))
-    return frac_rare * (1.0 - t) + frac_common * t
-
-
-def _median(values: list[float]) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    mid = len(ordered) // 2
-    if len(ordered) % 2:
-        return float(ordered[mid])
-    return 0.5 * (ordered[mid - 1] + ordered[mid])
-
-
-def select_train_by_quality(
-    records: list[dict],
-    floor: float = QUALITY_FLOOR,
-    frac_rare: float = KEEP_FRAC_RARE,
-    frac_common: float = KEEP_FRAC_COMMON,
-) -> tuple[list[dict], list[dict]]:
-    """Drop quality < floor, then keep top keep_frac(n) by quality per genus.
-
-    ``n`` is the post-floor count. Returns (kept records, per-genus stats).
-    """
-    by_genus: dict[str, list[dict]] = defaultdict(list)
-    for rec in records:
-        by_genus[rec["genus"]].append(rec)
-
-    after_floor_counts = {
-        g: sum(1 for r in recs if float(r["quality"]) >= floor)
-        for g, recs in by_genus.items()
-    }
-    positive = [n for n in after_floor_counts.values() if n > 0]
-    n_min = min(positive) if positive else 1
-    n_max = max(positive) if positive else 1
-
-    kept: list[dict] = []
-    stats: list[dict] = []
-    for genus in sorted(by_genus):
-        recs = by_genus[genus]
-        n_raw = len(recs)
-        usable = [r for r in recs if float(r["quality"]) >= floor]
-        n_after = len(usable)
-        if n_after == 0:
-            stats.append({
-                "genus": genus,
-                "n_raw": n_raw,
-                "n_after_floor": 0,
-                "n_kept": 0,
-                "keep_frac": None,
-                "kept_quality_min": None,
-                "kept_quality_median": None,
-            })
-            continue
-        frac = keep_frac_for_count(n_after, n_min, n_max, frac_rare, frac_common)
-        keep_n = max(1, math.ceil(frac * n_after))
-        ranked = sorted(usable, key=lambda r: (-float(r["quality"]), r["crop_path"]))
-        chosen = ranked[:keep_n]
-        kept.extend(chosen)
-        qualities = [float(r["quality"]) for r in chosen]
-        stats.append({
-            "genus": genus,
-            "n_raw": n_raw,
-            "n_after_floor": n_after,
-            "n_kept": len(chosen),
-            "keep_frac": frac,
-            "kept_quality_min": min(qualities),
-            "kept_quality_median": _median(qualities),
-        })
-    return kept, stats
-
-
-def drop_genera_missing_from_train(
-    splits: dict[str, list[dict]],
-) -> tuple[dict[str, list[dict]], list[str]]:
-    train_genera = {r["genus"] for r in splits["train"]}
-    all_genera = {r["genus"] for recs in splits.values() for r in recs}
-    dropped = sorted(all_genera - train_genera)
-    if not dropped:
-        return splits, dropped
-    drop_set = set(dropped)
-    filtered = {
-        key: [r for r in recs if r["genus"] not in drop_set]
-        for key, recs in splits.items()
-    }
-    return filtered, dropped
-
-
-def _log_selection_summary(
-    logger: logging.Logger,
-    genus_stats: list[dict],
-    totals: dict,
-) -> None:
-    _log(
-        logger,
-        f"selection totals: train_raw={totals['train_raw']} "
-        f"train_after_floor={totals['train_after_floor']} "
-        f"train_kept={totals['train_kept']} "
-        f"val_after_floor={totals['val_after_floor']} "
-        f"test_after_floor={totals['test_after_floor']}",
-    )
-    if not genus_stats:
-        return
-    by_raw = sorted(genus_stats, key=lambda r: (r["n_raw"], r["genus"]))
-
-    def _fmt(row: dict) -> str:
-        frac = row["keep_frac"]
-        frac_s = f"{frac:.2f}" if frac is not None else "na"
-        return (
-            f"{row['genus']} raw={row['n_raw']} floor={row['n_after_floor']} "
-            f"kept={row['n_kept']} frac={frac_s}"
-        )
-
-    smallest = by_raw[:10]
-    largest = list(reversed(by_raw[-10:]))
-    _log(logger, "smallest 10 genera: " + "; ".join(_fmt(r) for r in smallest))
-    _log(logger, "largest 10 genera: " + "; ".join(_fmt(r) for r in largest))
-
-
-# ---------------------------------------------------------------------------
 # Split
 # ---------------------------------------------------------------------------
 
@@ -474,16 +208,10 @@ def frozen_splits_path(project: str) -> Path:
 
 
 def splits_payload(splits: dict[str, list[dict]]) -> dict[str, list[dict]]:
-    payload: dict[str, list[dict]] = {}
-    for key, recs in splits.items():
-        rows = []
-        for rec in recs:
-            row = {"crop_path": rec["crop_path"], "genus": rec["genus"]}
-            if "quality" in rec:
-                row["quality"] = rec["quality"]
-            rows.append(row)
-        payload[key] = rows
-    return payload
+    return {
+        k: [{"crop_path": r["crop_path"], "genus": r["genus"]} for r in v]
+        for k, v in splits.items()
+    }
 
 
 def write_splits(path: Path, splits: dict[str, list[dict]]) -> None:
@@ -497,13 +225,9 @@ def load_splits(path: Path) -> dict[str, list[dict]]:
     for key in ("train", "val", "test"):
         if key not in data:
             raise ValueError(f"{path} missing '{key}'")
-        rows = []
-        for rec in data[key]:
-            row = {"crop_path": rec["crop_path"], "genus": rec["genus"]}
-            if "quality" in rec:
-                row["quality"] = rec["quality"]
-            rows.append(row)
-        splits[key] = rows
+        splits[key] = [
+            {"crop_path": r["crop_path"], "genus": r["genus"]} for r in data[key]
+        ]
     return splits
 
 
@@ -562,8 +286,7 @@ def _pil_to_uint8_tensor(img: Image.Image, img_size: int):
 
     boxed = letterbox(img, img_size, fill=0)
     # Keep as uint8 to shrink RAM cache; normalize later on-device.
-    # copy(): PIL buffers are read-only; PyTorch warns on non-writable arrays.
-    arr = np.asarray(boxed, dtype=np.uint8).transpose(2, 0, 1).copy()
+    arr = np.asarray(boxed, dtype=np.uint8).transpose(2, 0, 1)
     return torch.from_numpy(arr)
 
 
@@ -603,7 +326,7 @@ class FocalLoss:
         self.gamma = gamma
         self.alpha = alpha
 
-    def per_example(self, logits, targets):
+    def __call__(self, logits, targets):
         import torch.nn.functional as F
 
         log_probs = F.log_softmax(logits, dim=1)
@@ -611,10 +334,8 @@ class FocalLoss:
         targets = targets.long()
         log_pt = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
         pt = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
-        return -self.alpha * (1.0 - pt) ** self.gamma * log_pt
-
-    def __call__(self, logits, targets):
-        return self.per_example(logits, targets).mean()
+        loss = -self.alpha * (1.0 - pt) ** self.gamma * log_pt
+        return loss.mean()
 
 
 def pick_device():
@@ -744,70 +465,16 @@ class CropDataset:
         return arr, label
 
 
-def _macro_f1(
-    y_true: list[int],
-    y_pred: list[int],
-    num_classes: int,
-    supported_only: bool = False,
-) -> tuple[float, int]:
+def _macro_f1(y_true: list[int], y_pred: list[int], num_classes: int) -> float:
     f1s = []
     for c in range(num_classes):
-        support = sum(1 for t in y_true if t == c)
-        if supported_only and support == 0:
-            continue
         tp = sum(1 for t, p in zip(y_true, y_pred) if t == c and p == c)
         fp = sum(1 for t, p in zip(y_true, y_pred) if t != c and p == c)
         fn = sum(1 for t, p in zip(y_true, y_pred) if t == c and p != c)
         prec = tp / (tp + fp) if (tp + fp) else 0.0
         rec = tp / (tp + fn) if (tp + fn) else 0.0
         f1s.append(2 * prec * rec / (prec + rec) if (prec + rec) else 0.0)
-    n_scored = len(f1s)
-    if supported_only:
-        return (sum(f1s) / n_scored if n_scored else 0.0), n_scored
-    return (sum(f1s) / num_classes if num_classes else 0.0), num_classes
-
-
-def classification_metrics(
-    y_true: list[int],
-    y_pred: list[int],
-    num_classes: int,
-    losses: list[float] | None = None,
-    supported_only: bool = False,
-) -> dict:
-    n = len(y_true)
-    top1 = sum(1 for t, p in zip(y_true, y_pred) if t == p) / n if n else 0.0
-    macro_f1, n_classes_scored = _macro_f1(
-        y_true, y_pred, num_classes, supported_only=supported_only
-    )
-    loss = (sum(losses) / len(losses)) if losses else 0.0
-    return {
-        "loss": loss,
-        "top1": top1,
-        "macro_f1": macro_f1,
-        "n": n,
-        "n_classes_scored": n_classes_scored,
-    }
-
-
-def dual_metrics(
-    y_true: list[int],
-    y_pred: list[int],
-    qualities: list[float],
-    num_classes: int,
-    losses: list[float] | None = None,
-    hq_threshold: float = QUALITY_HQ,
-) -> dict[str, dict]:
-    all_metrics = classification_metrics(
-        y_true, y_pred, num_classes, losses=losses, supported_only=False
-    )
-    hq_idx = [i for i, q in enumerate(qualities) if q > hq_threshold]
-    hq_true = [y_true[i] for i in hq_idx]
-    hq_pred = [y_pred[i] for i in hq_idx]
-    hq_losses = [losses[i] for i in hq_idx] if losses is not None else None
-    hq_metrics = classification_metrics(
-        hq_true, hq_pred, num_classes, losses=hq_losses, supported_only=True
-    )
-    return {"all": all_metrics, "hq": hq_metrics}
+    return sum(f1s) / num_classes if num_classes else 0.0
 
 
 def worst_class_recalls(
@@ -819,31 +486,11 @@ def worst_class_recalls(
     rows = []
     for c, name in idx_to_class.items():
         support = sum(1 for t in y_true if t == c)
-        if support == 0:
-            continue
         tp = sum(1 for t, p in zip(y_true, y_pred) if t == c and p == c)
-        recall = tp / support
+        recall = tp / support if support else 0.0
         rows.append({"genus": name, "recall": recall, "support": support})
     rows.sort(key=lambda r: (r["recall"], r["genus"]))
     return rows[:k]
-
-
-def subset_pairs(
-    y_true: list[int],
-    y_pred: list[int],
-    qualities: list[float],
-    hq_only: bool,
-    hq_threshold: float = QUALITY_HQ,
-) -> tuple[list[int], list[int]]:
-    if not hq_only:
-        return y_true, y_pred
-    pairs = [
-        (t, p) for t, p, q in zip(y_true, y_pred, qualities) if q > hq_threshold
-    ]
-    if not pairs:
-        return [], []
-    t, p = zip(*pairs)
-    return list(t), list(p)
 
 
 def _log_worst_recalls(logger: logging.Logger, split: str, rows: list[dict]) -> None:
@@ -851,46 +498,32 @@ def _log_worst_recalls(logger: logging.Logger, split: str, rows: list[dict]) -> 
     _log(logger, f"worst {len(rows)} {split} recalls: " + ", ".join(parts))
 
 
-def _log_metrics_pair(logger: logging.Logger, prefix: str, metrics: dict) -> None:
-    all_m = metrics["all"]
-    hq_m = metrics["hq"]
-    _log(
-        logger,
-        f"{prefix} "
-        f"all_top1={all_m['top1']:.4f} all_macro_f1={all_m['macro_f1']:.4f} "
-        f"all_loss={all_m['loss']:.4f} all_n={all_m['n']} "
-        f"hq_top1={hq_m['top1']:.4f} hq_macro_f1={hq_m['macro_f1']:.4f} "
-        f"hq_loss={hq_m['loss']:.4f} hq_n={hq_m['n']} "
-        f"hq_classes={hq_m['n_classes_scored']}",
-    )
-
-
-def evaluate(
-    model,
-    loader,
-    criterion,
-    device,
-    num_classes: int,
-    qualities: list[float],
-) -> tuple[dict, list[int], list[int]]:
+def evaluate(model, loader, criterion, device, num_classes: int) -> tuple[dict, list[int], list[int]]:
     import torch
 
     model.eval()
+    loss_sum = 0.0
+    n = 0
     y_true: list[int] = []
     y_pred: list[int] = []
-    losses: list[float] = []
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device)
             x = _maybe_normalize_on_device(x)
             y = y.to(device)
             logits = model(x)
-            loss_vec = criterion.per_example(logits, y)
-            losses.extend(float(v) for v in loss_vec.detach().cpu().tolist())
+            loss = criterion(logits, y)
+            loss_sum += float(loss.item()) * x.size(0)
+            n += x.size(0)
             pred = logits.argmax(dim=1)
             y_true.extend(y.cpu().tolist())
             y_pred.extend(pred.cpu().tolist())
-    metrics = dual_metrics(y_true, y_pred, qualities, num_classes, losses=losses)
+    top1 = sum(1 for t, p in zip(y_true, y_pred) if t == p) / n if n else 0.0
+    metrics = {
+        "loss": loss_sum / n if n else 0.0,
+        "top1": top1,
+        "macro_f1": _macro_f1(y_true, y_pred, num_classes),
+    }
     return metrics, y_true, y_pred
 
 
@@ -912,10 +545,6 @@ def _hyperparams() -> dict:
         "patience": PATIENCE,
         "seed": SEED,
         "sampler": "inverse_sqrt",
-        "quality_floor": QUALITY_FLOOR,
-        "quality_hq": QUALITY_HQ,
-        "keep_frac_rare": KEEP_FRAC_RARE,
-        "keep_frac_common": KEEP_FRAC_COMMON,
     }
 
 
@@ -963,7 +592,6 @@ def run_epochs(
     run_dir: Path | None = None,
     class_to_idx: dict[str, int] | None = None,
     idx_to_class: dict[int, str] | None = None,
-    val_qualities: list[float] | None = None,
 ) -> tuple[dict | None, float, int]:
     stale = 0
     last_epoch = 0
@@ -995,32 +623,24 @@ def run_epochs(
             scheduler.step()
 
         train_loss = loss_sum / n if n else 0.0
-        val_metrics, _, _ = evaluate(
-            model, val_loader, criterion, device, num_classes, val_qualities or []
-        )
+        val_metrics, _, _ = evaluate(model, val_loader, criterion, device, num_classes)
         lr_msg = ""
         if scheduler is not None:
             lrs = [g["lr"] for g in optimizer.param_groups]
             lr_msg = " " + " ".join(f"lr{i}={lr:.2e}" for i, lr in enumerate(lrs))
-        hq = val_metrics["hq"]
-        all_m = val_metrics["all"]
         _log(
             logger,
             f"[{phase}] epoch {epoch}/{epochs} "
             f"train_loss={train_loss:.4f} "
-            f"val_loss={all_m['loss']:.4f} "
-            f"val_top1={all_m['top1']:.4f} "
-            f"val_macro_f1={all_m['macro_f1']:.4f} "
-            f"hq_val_top1={hq['top1']:.4f} "
-            f"hq_val_macro_f1={hq['macro_f1']:.4f} "
-            f"hq_n={hq['n']} hq_classes={hq['n_classes_scored']}"
+            f"val_loss={val_metrics['loss']:.4f} "
+            f"val_top1={val_metrics['top1']:.4f} "
+            f"val_macro_f1={val_metrics['macro_f1']:.4f}"
             f" data={t_data:.1f}s model={t_model:.1f}s"
             f"{lr_msg}",
         )
 
-        hq_f1 = hq["macro_f1"]
-        if hq_f1 > best_f1:
-            best_f1 = hq_f1
+        if val_metrics["macro_f1"] > best_f1:
+            best_f1 = val_metrics["macro_f1"]
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             if run_dir is not None and class_to_idx is not None and idx_to_class is not None:
                 save_best_checkpoint(
@@ -1030,7 +650,7 @@ def run_epochs(
                     idx_to_class,
                     val_metrics,
                 )
-                _log(logger, f"[{phase}] saved best.pt (hq_val_macro_f1={best_f1:.4f})")
+                _log(logger, f"[{phase}] saved best.pt (val_macro_f1={best_f1:.4f})")
             stale = 0
         else:
             stale += 1
@@ -1113,7 +733,6 @@ def train_model(
         "run_dir": run_dir,
         "class_to_idx": class_to_idx,
         "idx_to_class": idx_to_class,
-        "val_qualities": [float(r["quality"]) for r in splits["val"]],
     }
 
     # Phase A: head only
@@ -1192,30 +811,21 @@ def train_model(
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    val_qualities = [float(r["quality"]) for r in splits["val"]]
-    test_qualities = [float(r["quality"]) for r in splits["test"]]
     val_metrics, val_true, val_pred = evaluate(
-        model, val_loader, criterion, device, num_classes, val_qualities
+        model, val_loader, criterion, device, num_classes
     )
     test_metrics, test_true, test_pred = evaluate(
-        model, test_loader, criterion, device, num_classes, test_qualities
+        model, test_loader, criterion, device, num_classes
     )
-    val_true_hq, val_pred_hq = subset_pairs(val_true, val_pred, val_qualities, hq_only=True)
-    test_true_hq, test_pred_hq = subset_pairs(test_true, test_pred, test_qualities, hq_only=True)
-    val_worst = {
-        "all": worst_class_recalls(val_true, val_pred, idx_to_class),
-        "hq": worst_class_recalls(val_true_hq, val_pred_hq, idx_to_class),
-    }
-    test_worst = {
-        "all": worst_class_recalls(test_true, test_pred, idx_to_class),
-        "hq": worst_class_recalls(test_true_hq, test_pred_hq, idx_to_class),
-    }
-    _log_metrics_pair(logger, "final val", val_metrics)
-    _log_metrics_pair(logger, "final test", test_metrics)
-    _log_worst_recalls(logger, "val", val_worst["all"])
-    _log_worst_recalls(logger, "val hq", val_worst["hq"])
-    _log_worst_recalls(logger, "test", test_worst["all"])
-    _log_worst_recalls(logger, "test hq", test_worst["hq"])
+    val_worst = worst_class_recalls(val_true, val_pred, idx_to_class)
+    test_worst = worst_class_recalls(test_true, test_pred, idx_to_class)
+    _log(
+        logger,
+        f"final val_top1={val_metrics['top1']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
+        f"test_top1={test_metrics['top1']:.4f} test_macro_f1={test_metrics['macro_f1']:.4f}",
+    )
+    _log_worst_recalls(logger, "val", val_worst)
+    _log_worst_recalls(logger, "test", test_worst)
 
     save_best_checkpoint(
         run_dir / "best.pt",
@@ -1235,8 +845,7 @@ def train_model(
         "num_train": len(splits["train"]),
         "num_val": len(splits["val"]),
         "num_test": len(splits["test"]),
-        "best_val_hq_macro_f1": best_f1,
-        "best_val_macro_f1": val_metrics["all"]["macro_f1"],
+        "best_val_macro_f1": best_f1,
         "hyperparams": _hyperparams(),
     }
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
@@ -1308,64 +917,13 @@ def main() -> None:
         write_splits(frozen_path, splits)
         _log(logger, f"wrote frozen splits {frozen_path}")
 
-    crop_paths = sorted({r["crop_path"] for recs in splits.values() for r in recs})
-    scores = score_processed_crops(PROJECT, crop_paths, logger)
-    n_unscored = 0
-    attached: dict[str, list[dict]] = {}
-    for key, recs in splits.items():
-        attached[key], dropped = attach_quality(recs, scores)
-        n_unscored += dropped
-        if dropped:
-            _log(logger, f"{key}: dropped {dropped} images with no quality score")
-
-    all_scored = [r for recs in attached.values() for r in recs]
-    hist = quality_histogram(all_scored)
+    write_splits(run_dir / "splits.json", splits)
     _log(
         logger,
-        f"quality histogram: <0.3={hist['<0.3']} 0.3-0.7={hist['0.3-0.7']} "
-        f">0.7={hist['>0.7']} unscored={n_unscored}",
+        f"split: train={len(splits['train'])} val={len(splits['val'])} test={len(splits['test'])}",
     )
 
-    n_train_raw = len(attached["train"])
-    train_kept, genus_stats = select_train_by_quality(attached["train"])
-    val_kept = drop_below_quality_floor(attached["val"])
-    test_kept = drop_below_quality_floor(attached["test"])
-    effective = {"train": train_kept, "val": val_kept, "test": test_kept}
-    effective, dropped_genera = drop_genera_missing_from_train(effective)
-    if dropped_genera:
-        _log(logger, f"dropped genera with 0 train images after selection: {dropped_genera}")
-        genus_stats = [row for row in genus_stats if row["genus"] not in set(dropped_genera)]
-
-    selection = {
-        "quality_floor": QUALITY_FLOOR,
-        "quality_hq": QUALITY_HQ,
-        "keep_frac_rare": KEEP_FRAC_RARE,
-        "keep_frac_common": KEEP_FRAC_COMMON,
-        "dropped_genera": dropped_genera,
-        "totals": {
-            "train_raw": n_train_raw,
-            "train_after_floor": sum(row["n_after_floor"] for row in genus_stats),
-            "train_kept": len(effective["train"]),
-            "val_after_floor": len(effective["val"]),
-            "test_after_floor": len(effective["test"]),
-        },
-        "genera": genus_stats,
-    }
-    (run_dir / "selection.json").write_text(
-        json.dumps(selection, indent=2) + "\n", encoding="utf-8"
-    )
-    _log_selection_summary(logger, genus_stats, selection["totals"])
-
-    write_splits(run_dir / "splits.json", effective)
-    _log(
-        logger,
-        f"split: train={len(effective['train'])} val={len(effective['val'])} "
-        f"test={len(effective['test'])}",
-    )
-    if len(effective["train"]) < 2 or len(effective["val"]) < 1:
-        raise SystemExit("Not enough images after quality selection to train.")
-
-    metrics = train_model(run_dir, effective, logger)
+    metrics = train_model(run_dir, splits, logger)
     _log(logger, f"done. metrics={json.dumps(metrics)}")
 
 
