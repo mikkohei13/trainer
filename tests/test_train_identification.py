@@ -291,16 +291,25 @@ class TestWorstClassRecalls(unittest.TestCase):
         idx_to_class = {0: "Alpha", 1: "Beta"}
         y_true = [0, 0, 1, 1]
         y_pred = [0, 0, 1, 0]
-        rows = tid.worst_class_recalls(y_true, y_pred, idx_to_class, k=2)
+        rows = tid.worst_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=1)
         self.assertEqual(rows[0]["genus"], "Beta")
         self.assertAlmostEqual(rows[0]["recall"], 0.5)
         self.assertEqual(rows[1]["genus"], "Alpha")
         self.assertAlmostEqual(rows[1]["recall"], 1.0)
 
-    def test_skips_classes_with_no_support(self):
+    def test_skips_classes_below_min_support(self):
         idx_to_class = {0: "Alpha", 1: "Beta"}
-        rows = tid.worst_class_recalls([0, 0], [0, 1], idx_to_class, k=2)
+        y_true = [0] * 8 + [1, 1]
+        y_pred = [0] * 8 + [1, 0]
+        rows = tid.worst_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=8)
         self.assertEqual([r["genus"] for r in rows], ["Alpha"])
+
+    def test_ties_prefer_larger_support(self):
+        idx_to_class = {0: "Alpha", 1: "Beta"}
+        y_true = [0] * 8 + [1] * 12
+        y_pred = [1] * 8 + [0] * 12
+        rows = tid.worst_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=8)
+        self.assertEqual([r["genus"] for r in rows], ["Beta", "Alpha"])
 
 
 class TestBestClassRecalls(unittest.TestCase):
@@ -308,11 +317,18 @@ class TestBestClassRecalls(unittest.TestCase):
         idx_to_class = {0: "Alpha", 1: "Beta"}
         y_true = [0, 0, 1, 1]
         y_pred = [0, 0, 1, 0]
-        rows = tid.best_class_recalls(y_true, y_pred, idx_to_class, k=2)
+        rows = tid.best_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=1)
         self.assertEqual(rows[0]["genus"], "Alpha")
         self.assertAlmostEqual(rows[0]["recall"], 1.0)
         self.assertEqual(rows[1]["genus"], "Beta")
         self.assertAlmostEqual(rows[1]["recall"], 0.5)
+
+    def test_ties_prefer_larger_support(self):
+        idx_to_class = {0: "Alpha", 1: "Beta"}
+        y_true = [0] * 8 + [1] * 12
+        y_pred = [0] * 8 + [1] * 12
+        rows = tid.best_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=8)
+        self.assertEqual([r["genus"] for r in rows], ["Beta", "Alpha"])
 
 
 class TestFilterEvalByQuality(unittest.TestCase):

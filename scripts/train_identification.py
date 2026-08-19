@@ -44,7 +44,7 @@ HIGH_QUALITY = 0.7
 TRAIN_FRAC = 0.70
 VAL_FRAC = 0.20
 TEST_FRAC = 0.10
-SEED = 42
+SEED = 13
 
 # Evaluation image size (used for val/test).
 IMG_SIZE = 384
@@ -63,6 +63,8 @@ FOCAL_GAMMA = 2.0
 FOCAL_ALPHA = 0.25
 PATIENCE = 8
 WORST_CLASSES_TO_LOG = 20
+# Ignore tiny eval classes when ranking worst/best recall (n=1–4 is mostly noise).
+MIN_RECALL_SUPPORT = 8
 # Keep 0 when images are cached in RAM. DataLoader workers on MPS would copy
 # the cache per process and fight the GPU for unified memory.
 NUM_WORKERS = 0
@@ -342,8 +344,8 @@ def _pil_to_uint8_tensor(img: Image.Image, img_size: int):
 
     boxed = letterbox(img, img_size, fill=0)
     # Keep as uint8 to shrink RAM cache; normalize later on-device.
-    arr = np.asarray(boxed, dtype=np.uint8).transpose(2, 0, 1)
-    return torch.from_numpy(arr)
+    arr = np.array(boxed, dtype=np.uint8).transpose(2, 0, 1)
+    return torch.from_numpy(np.ascontiguousarray(arr))
 
 
 def _resize_max_side(img: Image.Image, max_side: int) -> Image.Image:
@@ -580,11 +582,12 @@ def class_recall_rows(
     y_true: list[int],
     y_pred: list[int],
     idx_to_class: dict[int, str],
+    min_support: int = MIN_RECALL_SUPPORT,
 ) -> list[dict]:
     rows = []
     for c, name in idx_to_class.items():
         support = sum(1 for t in y_true if t == c)
-        if support == 0:
+        if support < min_support:
             continue
         tp = sum(1 for t, p in zip(y_true, y_pred) if t == c and p == c)
         rows.append({"genus": name, "recall": tp / support, "support": support})
@@ -596,9 +599,10 @@ def worst_class_recalls(
     y_pred: list[int],
     idx_to_class: dict[int, str],
     k: int = WORST_CLASSES_TO_LOG,
+    min_support: int = MIN_RECALL_SUPPORT,
 ) -> list[dict]:
-    rows = class_recall_rows(y_true, y_pred, idx_to_class)
-    rows.sort(key=lambda r: (r["recall"], r["genus"]))
+    rows = class_recall_rows(y_true, y_pred, idx_to_class, min_support=min_support)
+    rows.sort(key=lambda r: (r["recall"], -r["support"], r["genus"]))
     return rows[:k]
 
 
@@ -607,9 +611,10 @@ def best_class_recalls(
     y_pred: list[int],
     idx_to_class: dict[int, str],
     k: int = WORST_CLASSES_TO_LOG,
+    min_support: int = MIN_RECALL_SUPPORT,
 ) -> list[dict]:
-    rows = class_recall_rows(y_true, y_pred, idx_to_class)
-    rows.sort(key=lambda r: (-r["recall"], r["genus"]))
+    rows = class_recall_rows(y_true, y_pred, idx_to_class, min_support=min_support)
+    rows.sort(key=lambda r: (-r["recall"], -r["support"], r["genus"]))
     return rows[:k]
 
 
@@ -618,12 +623,16 @@ def _log_class_recalls(
     kind: str,
     split: str,
     rows: list[dict],
+    min_support: int = MIN_RECALL_SUPPORT,
 ) -> None:
     if not rows:
-        _log(logger, f"{kind} {split} recalls: (none)")
+        _log(logger, f"{kind} {split} recalls (n>={min_support}): (none)")
         return
     parts = [f"{r['genus']}={r['recall']:.2f}(n={r['support']})" for r in rows]
-    _log(logger, f"{kind} {len(rows)} {split} recalls: " + ", ".join(parts))
+    _log(
+        logger,
+        f"{kind} {len(rows)} {split} recalls (n>={min_support}): " + ", ".join(parts),
+    )
 
 
 def evaluate(model, loader, criterion, device, num_classes: int) -> tuple[dict, list[int], list[int]]:
