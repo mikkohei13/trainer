@@ -15,6 +15,7 @@ dependencies = [
     "ultralytics",
     "timm",
     "scikit-learn",
+    "matplotlib",
 ]
 
 [build-system]
