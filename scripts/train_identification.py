@@ -39,6 +39,8 @@ PROJECT = "auchenorrhyncha"
 MIN_IMAGES_PER_CLASS = 10
 # Drop processed crops whose predicted quality is at or below this.
 MIN_QUALITY = 0.25
+# Final-model report: metrics on photos at or above this quality.
+HIGH_QUALITY = 0.7
 TRAIN_FRAC = 0.70
 VAL_FRAC = 0.20
 TEST_FRAC = 0.10
@@ -519,16 +521,74 @@ class CropDataset:
         return arr, label
 
 
-def _macro_f1(y_true: list[int], y_pred: list[int], num_classes: int) -> float:
+def _macro_f1(
+    y_true: list[int],
+    y_pred: list[int],
+    num_classes: int,
+    skip_empty: bool = False,
+) -> float:
     f1s = []
     for c in range(num_classes):
         tp = sum(1 for t, p in zip(y_true, y_pred) if t == c and p == c)
         fp = sum(1 for t, p in zip(y_true, y_pred) if t != c and p == c)
         fn = sum(1 for t, p in zip(y_true, y_pred) if t == c and p != c)
+        if skip_empty and (tp + fn) == 0:
+            continue
         prec = tp / (tp + fp) if (tp + fp) else 0.0
         rec = tp / (tp + fn) if (tp + fn) else 0.0
         f1s.append(2 * prec * rec / (prec + rec) if (prec + rec) else 0.0)
-    return sum(f1s) / num_classes if num_classes else 0.0
+    denom = len(f1s) if skip_empty else num_classes
+    return sum(f1s) / denom if denom else 0.0
+
+
+def classification_metrics(
+    y_true: list[int],
+    y_pred: list[int],
+    num_classes: int,
+    skip_empty: bool = False,
+) -> dict:
+    n = len(y_true)
+    top1 = sum(1 for t, p in zip(y_true, y_pred) if t == p) / n if n else 0.0
+    present = {t for t in y_true}
+    return {
+        "top1": top1,
+        "macro_f1": _macro_f1(y_true, y_pred, num_classes, skip_empty=skip_empty),
+        "n": n,
+        "num_classes": len(present),
+    }
+
+
+def filter_eval_by_quality(
+    records: list[dict],
+    y_true: list[int],
+    y_pred: list[int],
+    ratings: dict[str, float],
+    min_quality: float,
+) -> tuple[list[int], list[int]]:
+    """Keep eval pairs whose saved quality is at or above min_quality."""
+    kept_true: list[int] = []
+    kept_pred: list[int] = []
+    for rec, t, p in zip(records, y_true, y_pred):
+        score = ratings.get(rec["crop_path"])
+        if score is not None and score >= min_quality:
+            kept_true.append(t)
+            kept_pred.append(p)
+    return kept_true, kept_pred
+
+
+def class_recall_rows(
+    y_true: list[int],
+    y_pred: list[int],
+    idx_to_class: dict[int, str],
+) -> list[dict]:
+    rows = []
+    for c, name in idx_to_class.items():
+        support = sum(1 for t in y_true if t == c)
+        if support == 0:
+            continue
+        tp = sum(1 for t, p in zip(y_true, y_pred) if t == c and p == c)
+        rows.append({"genus": name, "recall": tp / support, "support": support})
+    return rows
 
 
 def worst_class_recalls(
@@ -537,19 +597,33 @@ def worst_class_recalls(
     idx_to_class: dict[int, str],
     k: int = WORST_CLASSES_TO_LOG,
 ) -> list[dict]:
-    rows = []
-    for c, name in idx_to_class.items():
-        support = sum(1 for t in y_true if t == c)
-        tp = sum(1 for t, p in zip(y_true, y_pred) if t == c and p == c)
-        recall = tp / support if support else 0.0
-        rows.append({"genus": name, "recall": recall, "support": support})
+    rows = class_recall_rows(y_true, y_pred, idx_to_class)
     rows.sort(key=lambda r: (r["recall"], r["genus"]))
     return rows[:k]
 
 
-def _log_worst_recalls(logger: logging.Logger, split: str, rows: list[dict]) -> None:
+def best_class_recalls(
+    y_true: list[int],
+    y_pred: list[int],
+    idx_to_class: dict[int, str],
+    k: int = WORST_CLASSES_TO_LOG,
+) -> list[dict]:
+    rows = class_recall_rows(y_true, y_pred, idx_to_class)
+    rows.sort(key=lambda r: (-r["recall"], r["genus"]))
+    return rows[:k]
+
+
+def _log_class_recalls(
+    logger: logging.Logger,
+    kind: str,
+    split: str,
+    rows: list[dict],
+) -> None:
+    if not rows:
+        _log(logger, f"{kind} {split} recalls: (none)")
+        return
     parts = [f"{r['genus']}={r['recall']:.2f}(n={r['support']})" for r in rows]
-    _log(logger, f"worst {len(rows)} {split} recalls: " + ", ".join(parts))
+    _log(logger, f"{kind} {len(rows)} {split} recalls: " + ", ".join(parts))
 
 
 def evaluate(model, loader, criterion, device, num_classes: int) -> tuple[dict, list[int], list[int]]:
@@ -572,11 +646,11 @@ def evaluate(model, loader, criterion, device, num_classes: int) -> tuple[dict, 
             pred = logits.argmax(dim=1)
             y_true.extend(y.cpu().tolist())
             y_pred.extend(pred.cpu().tolist())
-    top1 = sum(1 for t, p in zip(y_true, y_pred) if t == p) / n if n else 0.0
+    cls = classification_metrics(y_true, y_pred, num_classes)
     metrics = {
         "loss": loss_sum / n if n else 0.0,
-        "top1": top1,
-        "macro_f1": _macro_f1(y_true, y_pred, num_classes),
+        "top1": cls["top1"],
+        "macro_f1": cls["macro_f1"],
     }
     return metrics, y_true, y_pred
 
@@ -715,10 +789,47 @@ def run_epochs(
     return best_state, best_f1, last_epoch
 
 
+def _high_quality_report(
+    records: list[dict],
+    y_true: list[int],
+    y_pred: list[int],
+    ratings: dict[str, float],
+    idx_to_class: dict[int, str],
+    num_classes: int,
+) -> dict:
+    hq_true, hq_pred = filter_eval_by_quality(
+        records, y_true, y_pred, ratings, HIGH_QUALITY
+    )
+    metrics = classification_metrics(hq_true, hq_pred, num_classes, skip_empty=True)
+    return {
+        **metrics,
+        "worst_recall": worst_class_recalls(hq_true, hq_pred, idx_to_class),
+        "best_recall": best_class_recalls(hq_true, hq_pred, idx_to_class),
+    }
+
+
+def _log_split_recalls(
+    logger: logging.Logger,
+    split: str,
+    y_true: list[int],
+    y_pred: list[int],
+    idx_to_class: dict[int, str],
+    hq: dict,
+) -> tuple[list[dict], list[dict]]:
+    worst = worst_class_recalls(y_true, y_pred, idx_to_class)
+    best = best_class_recalls(y_true, y_pred, idx_to_class)
+    _log_class_recalls(logger, "worst", split, worst)
+    _log_class_recalls(logger, "best", split, best)
+    _log_class_recalls(logger, "worst", f"{split} high_quality", hq["worst_recall"])
+    _log_class_recalls(logger, "best", f"{split} high_quality", hq["best_recall"])
+    return worst, best
+
+
 def train_model(
     run_dir: Path,
     splits: dict[str, list[dict]],
     logger: logging.Logger,
+    ratings: dict[str, float],
 ) -> dict:
     import torch
     from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -871,15 +982,31 @@ def train_model(
     test_metrics, test_true, test_pred = evaluate(
         model, test_loader, criterion, device, num_classes
     )
-    val_worst = worst_class_recalls(val_true, val_pred, idx_to_class)
-    test_worst = worst_class_recalls(test_true, test_pred, idx_to_class)
+    val_hq = _high_quality_report(
+        splits["val"], val_true, val_pred, ratings, idx_to_class, num_classes
+    )
+    test_hq = _high_quality_report(
+        splits["test"], test_true, test_pred, ratings, idx_to_class, num_classes
+    )
     _log(
         logger,
         f"final val_top1={val_metrics['top1']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} "
         f"test_top1={test_metrics['top1']:.4f} test_macro_f1={test_metrics['macro_f1']:.4f}",
     )
-    _log_worst_recalls(logger, "val", val_worst)
-    _log_worst_recalls(logger, "test", test_worst)
+    _log(
+        logger,
+        f"high_quality (>={HIGH_QUALITY}) "
+        f"val_n={val_hq['n']} val_classes={val_hq['num_classes']} "
+        f"val_top1={val_hq['top1']:.4f} val_macro_f1={val_hq['macro_f1']:.4f} "
+        f"test_n={test_hq['n']} test_classes={test_hq['num_classes']} "
+        f"test_top1={test_hq['top1']:.4f} test_macro_f1={test_hq['macro_f1']:.4f}",
+    )
+    val_worst, val_best = _log_split_recalls(
+        logger, "val", val_true, val_pred, idx_to_class, val_hq
+    )
+    test_worst, test_best = _log_split_recalls(
+        logger, "test", test_true, test_pred, idx_to_class, test_hq
+    )
 
     save_best_checkpoint(
         run_dir / "best.pt",
@@ -894,7 +1021,12 @@ def train_model(
         "val": val_metrics,
         "test": test_metrics,
         "val_worst_recall": val_worst,
+        "val_best_recall": val_best,
         "test_worst_recall": test_worst,
+        "test_best_recall": test_best,
+        "val_high_quality": val_hq,
+        "test_high_quality": test_hq,
+        "high_quality_threshold": HIGH_QUALITY,
         "num_classes": num_classes,
         "num_train": len(splits["train"]),
         "num_val": len(splits["val"]),
@@ -945,7 +1077,11 @@ def main() -> None:
             "Run: uv run python scripts/crop_identification_images.py"
         )
     ratings = load_quality_ratings(PROJECT)
-    _log(logger, f"quality_ratings={ratings_path} images={len(ratings)} min_quality={MIN_QUALITY}")
+    _log(
+        logger,
+        f"quality_ratings={ratings_path} images={len(ratings)} "
+        f"min_quality={MIN_QUALITY} high_quality={HIGH_QUALITY}",
+    )
 
     frozen_path = frozen_splits_path(PROJECT)
     if frozen_path.is_file():
@@ -988,7 +1124,7 @@ def main() -> None:
         f"split: train={len(splits['train'])} val={len(splits['val'])} test={len(splits['test'])}",
     )
 
-    metrics = train_model(run_dir, splits, logger)
+    metrics = train_model(run_dir, splits, logger, ratings)
     _log(logger, f"done. metrics={json.dumps(metrics)}")
 
 

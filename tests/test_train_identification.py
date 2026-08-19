@@ -297,6 +297,55 @@ class TestWorstClassRecalls(unittest.TestCase):
         self.assertEqual(rows[1]["genus"], "Alpha")
         self.assertAlmostEqual(rows[1]["recall"], 1.0)
 
+    def test_skips_classes_with_no_support(self):
+        idx_to_class = {0: "Alpha", 1: "Beta"}
+        rows = tid.worst_class_recalls([0, 0], [0, 1], idx_to_class, k=2)
+        self.assertEqual([r["genus"] for r in rows], ["Alpha"])
+
+
+class TestBestClassRecalls(unittest.TestCase):
+    def test_orders_by_recall_desc(self):
+        idx_to_class = {0: "Alpha", 1: "Beta"}
+        y_true = [0, 0, 1, 1]
+        y_pred = [0, 0, 1, 0]
+        rows = tid.best_class_recalls(y_true, y_pred, idx_to_class, k=2)
+        self.assertEqual(rows[0]["genus"], "Alpha")
+        self.assertAlmostEqual(rows[0]["recall"], 1.0)
+        self.assertEqual(rows[1]["genus"], "Beta")
+        self.assertAlmostEqual(rows[1]["recall"], 0.5)
+
+
+class TestFilterEvalByQuality(unittest.TestCase):
+    def test_keeps_scores_at_or_above_threshold(self):
+        records = [
+            {"crop_path": "a/high.jpg"},
+            {"crop_path": "a/edge.jpg"},
+            {"crop_path": "a/low.jpg"},
+            {"crop_path": "a/missing.jpg"},
+        ]
+        y_true = [0, 1, 2, 3]
+        y_pred = [0, 1, 0, 3]
+        ratings = {"a/high.jpg": 0.9, "a/edge.jpg": 0.7, "a/low.jpg": 0.69}
+        yt, yp = tid.filter_eval_by_quality(records, y_true, y_pred, ratings, 0.7)
+        self.assertEqual(yt, [0, 1])
+        self.assertEqual(yp, [0, 1])
+
+
+class TestClassificationMetrics(unittest.TestCase):
+    def test_skip_empty_averages_only_classes_with_support(self):
+        # class 0: 2/2 correct; class 1 absent from y_true
+        y_true = [0, 0]
+        y_pred = [0, 0]
+        all_classes = tid.classification_metrics(y_true, y_pred, num_classes=2)
+        present = tid.classification_metrics(
+            y_true, y_pred, num_classes=2, skip_empty=True
+        )
+        self.assertAlmostEqual(all_classes["macro_f1"], 0.5)
+        self.assertAlmostEqual(present["macro_f1"], 1.0)
+        self.assertEqual(present["n"], 2)
+        self.assertEqual(present["num_classes"], 1)
+
+
 
 if __name__ == "__main__":
     unittest.main()
