@@ -37,6 +37,8 @@ from trainer.images import IMAGE_EXTS
 
 PROJECT = "auchenorrhyncha"
 MIN_IMAGES_PER_CLASS = 10
+# Drop processed crops whose predicted quality is at or below this.
+MIN_QUALITY = 0.25
 TRAIN_FRAC = 0.70
 VAL_FRAC = 0.20
 TEST_FRAC = 0.10
@@ -162,6 +164,58 @@ def filter_by_min_count(
     counts = Counter(genus for _, genus in labeled)
     keep = {g for g, n in counts.items() if n >= min_count}
     return [(path, genus) for path, genus in labeled if genus in keep]
+
+
+def quality_ratings_path(project: str) -> Path:
+    return PROCESSED_DIR / project / "quality.json"
+
+
+def load_quality_ratings(project: str) -> dict[str, float]:
+    path = quality_ratings_path(project)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return {str(k): float(v) for k, v in data.items()}
+
+
+def filter_labeled_by_quality(
+    labeled: list[tuple[str, str]],
+    ratings: dict[str, float],
+    logger: logging.Logger | None = None,
+    min_quality: float = MIN_QUALITY,
+) -> list[tuple[str, str]]:
+    """Keep labeled crops whose saved quality is strictly above min_quality."""
+    kept: list[tuple[str, str]] = []
+    dropped = 0
+    missing = 0
+    for rel, genus in labeled:
+        score = ratings.get(rel)
+        if score is None:
+            missing += 1
+            continue
+        if score <= min_quality:
+            dropped += 1
+            continue
+        kept.append((rel, genus))
+    if logger:
+        _log(
+            logger,
+            f"quality filter (drop score<={min_quality}): "
+            f"kept={len(kept)} dropped={dropped} missing={missing}",
+        )
+    return kept
+
+
+def filter_splits_by_quality(
+    splits: dict[str, list[dict]],
+    ratings: dict[str, float],
+    logger: logging.Logger | None = None,
+    min_quality: float = MIN_QUALITY,
+) -> dict[str, list[dict]]:
+    labeled = [(r["crop_path"], r["genus"]) for recs in splits.values() for r in recs]
+    kept = set(filter_labeled_by_quality(labeled, ratings, logger, min_quality))
+    return {
+        key: [r for r in recs if (r["crop_path"], r["genus"]) in kept]
+        for key, recs in splits.items()
+    }
 
 
 def labeled_to_records(labeled: list[tuple[str, str]]) -> list[dict]:
@@ -884,13 +938,24 @@ def main() -> None:
     _log(logger, f"project={PROJECT} identification_rank={rank}")
     _log(logger, f"processed_dir={processed_root}")
 
+    ratings_path = quality_ratings_path(PROJECT)
+    if not ratings_path.is_file():
+        raise SystemExit(
+            f"No quality ratings at {ratings_path}. "
+            "Run: uv run python scripts/crop_identification_images.py"
+        )
+    ratings = load_quality_ratings(PROJECT)
+    _log(logger, f"quality_ratings={ratings_path} images={len(ratings)} min_quality={MIN_QUALITY}")
+
     frozen_path = frozen_splits_path(PROJECT)
     if frozen_path.is_file():
         splits = load_splits(frozen_path)
         _log(logger, f"using frozen splits {frozen_path}")
+        splits = filter_splits_by_quality(splits, ratings, logger)
     else:
         labeled = collect_labeled_paths(PROJECT)
         _log(logger, f"harmonized processed images: {len(labeled)}")
+        labeled = filter_labeled_by_quality(labeled, ratings, logger)
         labeled = filter_by_min_count(labeled, MIN_IMAGES_PER_CLASS)
         genus_counts = Counter(g for _, g in labeled)
         _log(

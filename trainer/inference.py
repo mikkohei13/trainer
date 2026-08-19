@@ -146,7 +146,12 @@ def _crop_box_with_padding(img: Image.Image, box: dict, pad_frac: float) -> Imag
     return img.crop((left, top, right, bottom))
 
 
-def predict_quality_score(model_path: Path, image_abs_path: Path, box: dict) -> float:
+def predict_quality_score(
+    model_path: Path,
+    image_abs_path: Path,
+    box: dict | None = None,
+) -> float:
+    """Score image quality in [0, 1]. If `box` is omitted, the full image is used."""
     import torch
     from torchvision.transforms import Compose, Normalize, Resize, ToTensor
 
@@ -161,7 +166,7 @@ def predict_quality_score(model_path: Path, image_abs_path: Path, box: dict) -> 
 
     with Image.open(image_abs_path) as img:
         rgb = img.convert("RGB")
-        crop = _crop_box_with_padding(rgb, box, padding_fraction)
+        crop = rgb if box is None else _crop_box_with_padding(rgb, box, padding_fraction)
 
     x = transform(crop).unsqueeze(0).to(device)
     with torch.no_grad():

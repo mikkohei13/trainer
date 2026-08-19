@@ -49,6 +49,50 @@ class TestFilterByMinCount(unittest.TestCase):
         self.assertEqual(len(out), 10)
 
 
+class TestFilterByQuality(unittest.TestCase):
+    def test_drops_scores_at_or_below_threshold(self):
+        ratings = {
+            "a/high.jpg": 0.9,
+            "a/edge.jpg": 0.25,
+            "a/low.jpg": 0.24,
+            "b/just_above.jpg": 0.2500001,
+        }
+        labeled = [(rel, "Alpha") for rel in ratings]
+        out = tid.filter_labeled_by_quality(labeled, ratings)
+        self.assertEqual([rel for rel, _ in out], ["a/high.jpg", "b/just_above.jpg"])
+
+    def test_drops_when_rating_missing(self):
+        labeled = [("a/ok.jpg", "Alpha"), ("a/missing.jpg", "Alpha")]
+        out = tid.filter_labeled_by_quality(labeled, {"a/ok.jpg": 0.9})
+        self.assertEqual(out, [("a/ok.jpg", "Alpha")])
+
+    def test_filters_all_splits(self):
+        ratings = {
+            "a/train_ok.jpg": 0.8,
+            "a/train_low.jpg": 0.1,
+            "a/val_ok.jpg": 0.6,
+            "a/test_low.jpg": 0.0,
+        }
+        splits = {
+            "train": [
+                {"crop_path": "a/train_ok.jpg", "genus": "Alpha"},
+                {"crop_path": "a/train_low.jpg", "genus": "Alpha"},
+            ],
+            "val": [{"crop_path": "a/val_ok.jpg", "genus": "Alpha"}],
+            "test": [{"crop_path": "a/test_low.jpg", "genus": "Alpha"}],
+        }
+        out = tid.filter_splits_by_quality(splits, ratings)
+        self.assertEqual(out["train"], [{"crop_path": "a/train_ok.jpg", "genus": "Alpha"}])
+        self.assertEqual(out["val"], [{"crop_path": "a/val_ok.jpg", "genus": "Alpha"}])
+        self.assertEqual(out["test"], [])
+
+    def test_quality_json_path(self):
+        self.assertEqual(
+            tid.quality_ratings_path("bugs"),
+            tid.PROCESSED_DIR / "bugs" / "quality.json",
+        )
+
+
 class TestLetterbox(unittest.TestCase):
     def test_square_output(self):
         img = Image.new("RGB", (100, 50), (255, 0, 0))
@@ -97,11 +141,17 @@ class TestCropProjectImagesSkipsFailures(unittest.TestCase):
         crop.PROCESSED_DIR = self._orig_processed
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    @patch.object(crop, "predict_quality_score")
+    @patch.object(crop.db, "get_active_quality_model_path_for_taxon")
     @patch.object(crop, "predict_top_box")
     @patch.object(crop.db, "get_active_model_path_for_taxon")
     @patch.object(crop, "list_project_image_paths")
-    def test_continues_when_predict_fails(self, mock_paths, mock_model, mock_predict):
+    def test_continues_when_predict_fails(
+        self, mock_paths, mock_model, mock_predict, mock_quality_model, mock_quality
+    ):
         mock_model.return_value = Path("/tmp/fake.pt")
+        mock_quality_model.return_value = Path("/tmp/quality.pt")
+        mock_quality.return_value = 0.8
         mock_paths.return_value = [
             "bugs/col/Taxon/bad.jpg",
             "bugs/col/Taxon/ok.jpg",
@@ -117,6 +167,74 @@ class TestCropProjectImagesSkipsFailures(unittest.TestCase):
 
         self.assertTrue((self.processed / "bugs/col/Taxon/ok.jpg").is_file())
         self.assertFalse((self.processed / "bugs/col/Taxon/bad.jpg").is_file())
+        ratings = crop.load_quality_ratings("bugs")
+        self.assertEqual(ratings, {"bugs/col/Taxon/ok.jpg": 0.8})
+
+
+class TestCropSkipsExistingCropAndRating(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.images = self.tmp / "images"
+        self.processed = self.tmp / "processed"
+        taxon_dir = self.images / "bugs" / "col" / "Taxon"
+        taxon_dir.mkdir(parents=True)
+        Image.new("RGB", (20, 20), (1, 2, 3)).save(taxon_dir / "a.jpg")
+        Image.new("RGB", (20, 20), (4, 5, 6)).save(taxon_dir / "b.jpg")
+
+        self._orig_images = crop.IMAGES_DIR
+        self._orig_processed = crop.PROCESSED_DIR
+        crop.IMAGES_DIR = self.images
+        crop.PROCESSED_DIR = self.processed
+
+    def tearDown(self):
+        crop.IMAGES_DIR = self._orig_images
+        crop.PROCESSED_DIR = self._orig_processed
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_crop(self, name: str) -> None:
+        out = self.processed / "bugs" / "col" / "Taxon"
+        out.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (10, 10), (9, 9, 9)).save(out / name)
+
+    @patch.object(crop, "predict_quality_score")
+    @patch.object(crop.db, "get_active_quality_model_path_for_taxon")
+    @patch.object(crop, "predict_top_box")
+    @patch.object(crop.db, "get_active_model_path_for_taxon")
+    @patch.object(crop, "list_project_image_paths")
+    def test_rates_existing_crop_without_recropping(
+        self, mock_paths, mock_model, mock_predict, mock_quality_model, mock_quality
+    ):
+        mock_model.return_value = Path("/tmp/fake.pt")
+        mock_quality_model.return_value = Path("/tmp/quality.pt")
+        mock_quality.return_value = 0.42
+        mock_paths.return_value = ["bugs/col/Taxon/a.jpg"]
+        self._write_crop("a.jpg")
+
+        crop.crop_project_images("bugs")
+
+        mock_predict.assert_not_called()
+        mock_quality.assert_called_once()
+        self.assertEqual(crop.load_quality_ratings("bugs")["bugs/col/Taxon/a.jpg"], 0.42)
+
+    @patch.object(crop, "predict_quality_score")
+    @patch.object(crop.db, "get_active_quality_model_path_for_taxon")
+    @patch.object(crop, "predict_top_box")
+    @patch.object(crop.db, "get_active_model_path_for_taxon")
+    @patch.object(crop, "list_project_image_paths")
+    def test_skips_existing_rating(
+        self, mock_paths, mock_model, mock_predict, mock_quality_model, mock_quality
+    ):
+        mock_model.return_value = Path("/tmp/fake.pt")
+        mock_quality_model.return_value = Path("/tmp/quality.pt")
+        mock_paths.return_value = ["bugs/col/Taxon/a.jpg"]
+        self._write_crop("a.jpg")
+        crop.save_quality_ratings("bugs", {"bugs/col/Taxon/a.jpg": 0.11})
+
+        crop.crop_project_images("bugs")
+
+        mock_predict.assert_not_called()
+        mock_quality.assert_not_called()
+        self.assertEqual(crop.load_quality_ratings("bugs")["bugs/col/Taxon/a.jpg"], 0.11)
 
 
 class TestListProcessed(unittest.TestCase):

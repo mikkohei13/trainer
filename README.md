@@ -65,11 +65,12 @@ uv run python scripts/crop_identification_images.py
 uv run python scripts/train_identification.py
 ```
 
-1. **Crop.** The project's active object-detection model finds the highest-confidence insect in each image under `trainer/images/<project>/`. The box is padded 10% and saved under `trainer/images_processed/<project>/` with the same folder layout. Originals are never modified. Existing crops are skipped; images with no detection are skipped.
+1. **Crop.** The project's active object-detection model finds the highest-confidence insect in each image under `trainer/images/<project>/`. The box is padded 10% and saved under `trainer/images_processed/<project>/` with the same folder layout. Originals are never modified. Existing crops are skipped; images with no detection are skipped. The script also adds a quality score to the crops, saving this data to `trainer/images_processed/<project>/quality.json`.
 2. **Labels.** Folder names are mapped through `harmonization.tsv`. The class is the first word of the authoritative name (genus). Unmatched folders (e.g. `Non_insects`) are dropped. Genera with fewer than 10 crops are dropped.
-3. **Split.** Remaining crops are split 80/10/10 train/val/test, stratified by genus.
-4. **Train.** EfficientNetV2-S pretrained on ImageNet-21k. Inputs are letterboxed to 384×384. Train-only augmentation: flip, 90° multiples plus ±30° rotation, mild scale, brightness/contrast/saturation. Focal Loss (γ=2) plus inverse-sqrt class sampling. Phase A trains the head only; phase B unfreezes the last 60 leaf modules with a lower backbone LR than the head and a cosine LR decay. Early stop on val macro-F1; `best.pt` is written whenever it improves. Logs the 20 genera with worst recall.
-5. **Output.** `trainer/models/<project>/identification/<run_id>/` contains `best.pt`, `metrics.json` (val/test top-1, macro-F1, worst-class recalls), `splits.json`, `label_map.json`, and `train.log`.
+3. **Split.** Remaining crops are split to train/val/test, stratified by genus. Splits are saved to `trainer/models/<project>/identification/splits.json` so that multiple runs will use the same split. Note: If modifying train/val/test ratio, remember to delete the `splits.json` file.
+5. **Train.** EfficientNetV2-S pretrained on ImageNet-21k. Inputs are letterboxed to 384×384. Train-only augmentation: flip, 90° multiples plus ±30° rotation, mild scale, brightness/contrast/saturation. Focal Loss (γ=2) plus inverse-sqrt class sampling. Phase A trains the head only; phase B unfreezes the last 60 leaf modules with a lower backbone LR than the head and a cosine LR decay. Early stop on val macro-F1; `best.pt` is written whenever it improves. Logs the 20 genera with worst recall.
+6. **Output.** `trainer/models/<project>/identification/<run_id>/` contains `best.pt`, `metrics.json` (val/test top-1, macro-F1, worst-class recalls), `splits.json`, `label_map.json`, and `train.log`.
+7. **Test.** You can use `test_identification.py` to run the model on images in `data/<project>/test`.
 
 Does not yet split by observation, so near-duplicate iNat photos can leak across splits.
 
