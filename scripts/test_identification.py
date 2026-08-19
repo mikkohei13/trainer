@@ -20,7 +20,7 @@ from trainer.images import IMAGE_EXTS
 from trainer.inference import predict_top_box
 
 PROJECT = "auchenorrhyncha"
-RUN_ID = "20260817-235733"
+RUN_ID = "20260819-135326"
 TOP_K = 5
 BBOX_PADDING_FRACTION = 0.10
 
@@ -104,7 +104,9 @@ def load_model(ckpt_path: Path, device):
     model.load_state_dict(ckpt["state_dict"])
     model = model.to(device)
     model.eval()
-    return model, idx_to_class, int(ckpt["img_size"])
+    # Newer runs save img_size_eval; older runs saved a single img_size.
+    img_size = ckpt.get("img_size_eval", ckpt.get("img_size"))
+    return model, idx_to_class, int(img_size)
 
 
 def prepare_image(path: Path, od_model_path: Path | None) -> tuple[Image.Image, str]:

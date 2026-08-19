@@ -52,7 +52,7 @@ The app trains a quality regression model from manually rated images:
 
 ### Object detection model
 
-- todo
+- documentation todo
 
 ### Taxon identification model
 
