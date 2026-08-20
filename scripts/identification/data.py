@@ -45,6 +45,14 @@ def folder_name_from_image_path(rel_path: str) -> str:
     return Path(rel_path).parent.name
 
 
+def collection_from_crop_path(crop_path: str) -> str:
+    """Source folder under project/, e.g. inaturalist from project/inaturalist/..."""
+    parts = crop_path.split("/")
+    if len(parts) < 2:
+        raise ValueError(f"unexpected crop_path: {crop_path}")
+    return parts[1]
+
+
 def build_folder_to_genus(project: str) -> dict[str, str]:
     rows = read_harmonization(harmonization_path(project)) or []
     mapping: dict[str, str] = {}
@@ -90,6 +98,46 @@ def filter_by_min_count(
     counts = Counter(genus for _, genus in labeled)
     keep = {g for g, n in counts.items() if n >= min_count}
     return [(path, genus) for path, genus in labeled if genus in keep]
+
+
+def filter_labeled_by_collections(
+    labeled: list[tuple[str, str]],
+    excluded: tuple[str, ...] | list[str] | None = None,
+    logger: logging.Logger | None = None,
+) -> list[tuple[str, str]]:
+    """Drop crops whose source collection is in excluded."""
+    if excluded is None:
+        excluded = config.EXCLUDE_COLLECTIONS
+    if not excluded:
+        return labeled
+    excluded_set = set(excluded)
+    kept: list[tuple[str, str]] = []
+    dropped = 0
+    for path, genus in labeled:
+        if collection_from_crop_path(path) in excluded_set:
+            dropped += 1
+            continue
+        kept.append((path, genus))
+    if logger:
+        log(
+            logger,
+            f"excluded collections {sorted(excluded_set)}: "
+            f"kept={len(kept)} dropped={dropped}",
+        )
+    return kept
+
+
+def filter_splits_by_collections(
+    splits: dict[str, list[dict]],
+    excluded: tuple[str, ...] | list[str] | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, list[dict]]:
+    labeled = [(r["crop_path"], r["genus"]) for recs in splits.values() for r in recs]
+    kept = set(filter_labeled_by_collections(labeled, excluded, logger))
+    return {
+        key: [r for r in recs if (r["crop_path"], r["genus"]) in kept]
+        for key, recs in splits.items()
+    }
 
 
 def quality_ratings_path(project: str) -> Path:
@@ -157,29 +205,97 @@ def inverse_sqrt_sample_weights(records: list[dict]) -> list[float]:
     return [class_w[r["genus"]] for r in records]
 
 
+def observations_path(project: str) -> Path:
+    return config.PROCESSED_DIR / project / "inaturalist_observations.json"
+
+
+def load_photo_to_observation(project: str) -> dict[str, int]:
+    """Map inaturalist-relative photo path → observation id, or {} if missing."""
+    path = observations_path(project)
+    if not path.is_file():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    mapping = data.get("photo_to_observation") or {}
+    return {str(k): int(v) for k, v in mapping.items()}
+
+
+def _inaturalist_rel_path(crop_path: str, project: str) -> str | None:
+    """If crop is under <project>/inaturalist/, return path relative to that root."""
+    prefix = f"{project}/inaturalist/"
+    if not crop_path.startswith(prefix):
+        return None
+    return crop_path[len(prefix) :]
+
+
+def group_records_by_observation(
+    records: list[dict],
+    photo_to_observation: dict[str, int],
+    project: str,
+) -> list[list[dict]]:
+    """
+    Bundle iNaturalist crops from the same observation; other crops are singletons.
+
+    Photos in photo_to_observation share one unit. Unmapped iNaturalist photos and
+    all non-iNaturalist photos each form their own unit.
+    """
+    units_by_obs: dict[int, list[dict]] = {}
+    singletons: list[list[dict]] = []
+    for rec in records:
+        inat_rel = _inaturalist_rel_path(rec["crop_path"], project)
+        obs_id = photo_to_observation.get(inat_rel) if inat_rel else None
+        if obs_id is None:
+            singletons.append([rec])
+        else:
+            units_by_obs.setdefault(obs_id, []).append(rec)
+    return [units_by_obs[i] for i in sorted(units_by_obs)] + singletons
+
+
+def _flatten_units(units: list[list[dict]]) -> list[dict]:
+    return [rec for unit in units for rec in unit]
+
+
 def stratified_split(
     records: list[dict],
     seed: int | None = None,
+    photo_to_observation: dict[str, int] | None = None,
+    project: str | None = None,
 ) -> dict[str, list[dict]]:
+    """
+    Stratified train/val/test split.
+
+    When project + photo_to_observation are provided, splits whole observations
+    (and singleton non-iNat images) so photos from one observation stay together.
+    Fractions are targets over units; image counts may differ slightly.
+    """
     if seed is None:
         seed = config.SEED
     assert abs(config.TRAIN_FRAC + config.VAL_FRAC + config.TEST_FRAC - 1.0) < 1e-9
-    labels = [r["genus"] for r in records]
-    train_recs, rest_recs, _, rest_labels = train_test_split(
-        records,
+
+    if photo_to_observation is not None and project is not None:
+        units = group_records_by_observation(records, photo_to_observation, project)
+    else:
+        units = [[r] for r in records]
+
+    labels = [unit[0]["genus"] for unit in units]
+    train_units, rest_units, _, rest_labels = train_test_split(
+        units,
         labels,
         test_size=(config.VAL_FRAC + config.TEST_FRAC),
         random_state=seed,
         stratify=labels,
     )
     relative_test = config.TEST_FRAC / (config.VAL_FRAC + config.TEST_FRAC)
-    val_recs, test_recs = train_test_split(
-        rest_recs,
+    val_units, test_units = train_test_split(
+        rest_units,
         test_size=relative_test,
         random_state=seed,
         stratify=rest_labels,
     )
-    return {"train": train_recs, "val": val_recs, "test": test_recs}
+    return {
+        "train": _flatten_units(train_units),
+        "val": _flatten_units(val_units),
+        "test": _flatten_units(test_units),
+    }
 
 
 def frozen_splits_path(project: str) -> Path:

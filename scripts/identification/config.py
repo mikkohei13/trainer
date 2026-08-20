@@ -8,6 +8,8 @@ import numpy as np
 
 PROJECT = "auchenorrhyncha"
 MIN_IMAGES_PER_CLASS = 10
+# Skip these source folders under images_processed/<project>/ (train/val/test).
+EXCLUDE_COLLECTIONS = ("truehopperswp",)
 # Drop processed crops whose predicted quality is at or below this.
 MIN_QUALITY = 0.25
 # Final-model report: metrics on photos at or above this quality.

@@ -16,14 +16,19 @@ from . import config
 from .data import (
     collect_labeled_paths,
     filter_by_min_count,
+    filter_labeled_by_collections,
     filter_labeled_by_quality,
+    filter_splits_by_collections,
     filter_splits_by_quality,
     frozen_splits_path,
+    group_records_by_observation,
     inverse_sqrt_sample_weights,
     labeled_to_records,
+    load_photo_to_observation,
     load_quality_ratings,
     load_splits,
     log,
+    observations_path,
     quality_ratings_path,
     setup_logging,
     stratified_split,
@@ -675,14 +680,19 @@ def main() -> None:
         f"min_quality={config.MIN_QUALITY} high_quality={config.HIGH_QUALITY}",
     )
 
+    if config.EXCLUDE_COLLECTIONS:
+        log(logger, f"exclude_collections={list(config.EXCLUDE_COLLECTIONS)}")
+
     frozen_path = frozen_splits_path(config.PROJECT)
     if frozen_path.is_file():
         splits = load_splits(frozen_path)
         log(logger, f"using frozen splits {frozen_path}")
+        splits = filter_splits_by_collections(splits, logger=logger)
         splits = filter_splits_by_quality(splits, ratings, logger)
     else:
         labeled = collect_labeled_paths(config.PROJECT)
         log(logger, f"harmonized processed images: {len(labeled)}")
+        labeled = filter_labeled_by_collections(labeled, logger=logger)
         labeled = filter_labeled_by_quality(labeled, ratings, logger)
         labeled = filter_by_min_count(labeled, config.MIN_IMAGES_PER_CLASS)
         genus_counts = Counter(g for _, g in labeled)
@@ -699,21 +709,55 @@ def main() -> None:
 
         records = labeled_to_records(labeled)
 
-        # Stratified split needs at least 2 samples per class for 3-way split.
+        photo_to_obs = load_photo_to_observation(config.PROJECT)
+        obs_file = observations_path(config.PROJECT)
+        if photo_to_obs:
+            units = group_records_by_observation(
+                records, photo_to_obs, config.PROJECT
+            )
+            multi = sum(1 for u in units if len(u) > 1)
+            log(
+                logger,
+                f"observation groups from {obs_file}: "
+                f"units={len(units)} multi_photo={multi} "
+                f"mapped_photos={len(photo_to_obs)}",
+            )
+        else:
+            units = [[r] for r in records]
+            log(logger, f"no observation map at {obs_file}; splitting per image")
+
+        # Stratified 3-way split needs enough units per class (not just images).
         min_for_split = 3
-        too_small = {g for g, n in genus_counts.items() if n < min_for_split}
+        unit_genus_counts = Counter(u[0]["genus"] for u in units)
+        too_small = {g for g, n in unit_genus_counts.items() if n < min_for_split}
         if too_small:
             records = [r for r in records if r["genus"] not in too_small]
-            log(logger, f"dropped genera with <{min_for_split} images: {sorted(too_small)}")
+            log(
+                logger,
+                f"dropped genera with <{min_for_split} split units: {sorted(too_small)}",
+            )
 
-        splits = stratified_split(records, seed=config.SEED)
+        splits = stratified_split(
+            records,
+            seed=config.SEED,
+            photo_to_observation=photo_to_obs,
+            project=config.PROJECT,
+        )
         write_splits(frozen_path, splits)
         log(logger, f"wrote frozen splits {frozen_path}")
 
     write_splits(run_dir / "splits.json", splits)
+    n_train, n_val, n_test = (
+        len(splits["train"]),
+        len(splits["val"]),
+        len(splits["test"]),
+    )
+    n_total = max(n_train + n_val + n_test, 1)
     log(
         logger,
-        f"split: train={len(splits['train'])} val={len(splits['val'])} test={len(splits['test'])}",
+        f"split: train={n_train} ({n_train / n_total:.1%}) "
+        f"val={n_val} ({n_val / n_total:.1%}) "
+        f"test={n_test} ({n_test / n_total:.1%})",
     )
 
     metrics = train_model(run_dir, splits, logger, ratings)

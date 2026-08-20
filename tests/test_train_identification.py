@@ -1,6 +1,7 @@
 """Unit tests for identification crop / train helpers (no OD / no full train)."""
 
 import importlib.util
+import json
 import shutil
 import sys
 import tempfile
@@ -56,6 +57,53 @@ class TestFilterByMinCount(unittest.TestCase):
         genera = {g for _, g in out}
         self.assertEqual(genera, {"Alpha"})
         self.assertEqual(len(out), 10)
+
+
+class TestFilterByCollections(unittest.TestCase):
+    def test_collection_from_crop_path(self):
+        self.assertEqual(
+            tid_data.collection_from_crop_path("bugs/truehopperswp/Taxon/a.jpg"),
+            "truehopperswp",
+        )
+
+    def test_drops_excluded_collections(self):
+        labeled = [
+            ("bugs/inaturalist/A/1.jpg", "Alpha"),
+            ("bugs/truehopperswp/A/2.jpg", "Alpha"),
+            ("bugs/vihko/B/3.jpg", "Beta"),
+        ]
+        out = tid_data.filter_labeled_by_collections(
+            labeled, excluded=("truehopperswp",)
+        )
+        self.assertEqual(
+            out,
+            [
+                ("bugs/inaturalist/A/1.jpg", "Alpha"),
+                ("bugs/vihko/B/3.jpg", "Beta"),
+            ],
+        )
+
+    def test_filters_all_splits(self):
+        splits = {
+            "train": [
+                {"crop_path": "bugs/inaturalist/A/1.jpg", "genus": "Alpha"},
+                {"crop_path": "bugs/truehopperswp/A/2.jpg", "genus": "Alpha"},
+            ],
+            "val": [{"crop_path": "bugs/truehopperswp/B/3.jpg", "genus": "Beta"}],
+            "test": [{"crop_path": "bugs/vihko/C/4.jpg", "genus": "Gamma"}],
+        }
+        out = tid_data.filter_splits_by_collections(
+            splits, excluded=("truehopperswp",)
+        )
+        self.assertEqual(
+            out["train"],
+            [{"crop_path": "bugs/inaturalist/A/1.jpg", "genus": "Alpha"}],
+        )
+        self.assertEqual(out["val"], [])
+        self.assertEqual(
+            out["test"],
+            [{"crop_path": "bugs/vihko/C/4.jpg", "genus": "Gamma"}],
+        )
 
 
 class TestFilterByQuality(unittest.TestCase):
@@ -286,6 +334,96 @@ class TestFrozenSplits(unittest.TestCase):
         self.assertEqual(
             path, tid_config.MODELS_DIR / "bugs" / "identification" / "splits.json"
         )
+
+
+class TestObservationAwareSplit(unittest.TestCase):
+    def test_groups_same_observation(self):
+        records = [
+            {"crop_path": "bugs/inaturalist/A/1.jpg", "genus": "Alpha"},
+            {"crop_path": "bugs/inaturalist/A/2.jpg", "genus": "Alpha"},
+            {"crop_path": "bugs/britishbugs/A/x.jpg", "genus": "Alpha"},
+        ]
+        photo_to_obs = {"A/1.jpg": 10, "A/2.jpg": 10}
+        units = tid_data.group_records_by_observation(records, photo_to_obs, "bugs")
+        self.assertEqual(len(units), 2)
+        multi = next(u for u in units if len(u) == 2)
+        paths = {r["crop_path"] for r in multi}
+        self.assertEqual(
+            paths,
+            {"bugs/inaturalist/A/1.jpg", "bugs/inaturalist/A/2.jpg"},
+        )
+
+    def test_split_keeps_observation_together(self):
+        # Enough distinct units per genus for stratified 3-way split.
+        records = []
+        photo_to_obs = {}
+        for i in range(12):
+            records.append(
+                {
+                    "crop_path": f"bugs/inaturalist/A/{i}a.jpg",
+                    "genus": "Alpha",
+                }
+            )
+            records.append(
+                {
+                    "crop_path": f"bugs/inaturalist/A/{i}b.jpg",
+                    "genus": "Alpha",
+                }
+            )
+            photo_to_obs[f"A/{i}a.jpg"] = 100 + i
+            photo_to_obs[f"A/{i}b.jpg"] = 100 + i
+        for i in range(12):
+            records.append(
+                {
+                    "crop_path": f"bugs/inaturalist/B/{i}.jpg",
+                    "genus": "Beta",
+                }
+            )
+            photo_to_obs[f"B/{i}.jpg"] = 200 + i
+
+        splits = tid_data.stratified_split(
+            records,
+            seed=0,
+            photo_to_observation=photo_to_obs,
+            project="bugs",
+        )
+        path_to_split = {}
+        for name, recs in splits.items():
+            for r in recs:
+                path_to_split[r["crop_path"]] = name
+
+        for i in range(12):
+            a = path_to_split[f"bugs/inaturalist/A/{i}a.jpg"]
+            b = path_to_split[f"bugs/inaturalist/A/{i}b.jpg"]
+            self.assertEqual(a, b, f"observation {100 + i} split across {a} and {b}")
+
+        all_paths = {r["crop_path"] for recs in splits.values() for r in recs}
+        self.assertEqual(all_paths, {r["crop_path"] for r in records})
+
+    def test_load_photo_to_observation_missing_file(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            with patch.object(tid_config, "PROCESSED_DIR", tmp):
+                self.assertEqual(tid_data.load_photo_to_observation("bugs"), {})
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_load_photo_to_observation(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            project = tmp / "bugs"
+            project.mkdir()
+            payload = {
+                "photo_to_observation": {"Taxon/1.jpg": 0, "Taxon/2.jpg": 0},
+            }
+            (project / "inaturalist_observations.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            with patch.object(tid_config, "PROCESSED_DIR", tmp):
+                mapping = tid_data.load_photo_to_observation("bugs")
+            self.assertEqual(mapping, {"Taxon/1.jpg": 0, "Taxon/2.jpg": 0})
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestInverseSqrtWeights(unittest.TestCase):
