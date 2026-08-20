@@ -83,10 +83,7 @@ See AGENTS.md for the development principles and product constraints.
 ## Notes
 
 - iNat observations often contain multiple nearly similar images of the same individual. These can cause leaking/overfitting. Todo: for first taxa, remove images and download again, since now the script takes images accross observations.
-- Quality model has trained on images that were first cropped using object detection model.
-
-- Check which taxa have many observations and few images, and why.
-  - Verdanus:
+- Adults and nymphs are often very different, and can cause noise and low accuracy. Todo: create a life stage model (use training data from all species), train separate adult and nymph models.
 
 
 - Object detection model notes:

@@ -2,12 +2,22 @@
 
 import importlib.util
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image
+
+_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from identification import config as tid_config
+from identification import data as tid_data
+from identification import dataset as tid_dataset
+from identification import train as tid_train
 
 
 def _load_script(name: str):
@@ -19,20 +29,19 @@ def _load_script(name: str):
     return module
 
 
-tid = _load_script("train_identification.py")
 crop = _load_script("crop_identification_images.py")
 
 
 class TestGenusFromAuthoritative(unittest.TestCase):
     def test_first_word(self):
-        self.assertEqual(tid.genus_from_authoritative("Acericerus ribauti"), "Acericerus")
+        self.assertEqual(tid_data.genus_from_authoritative("Acericerus ribauti"), "Acericerus")
 
     def test_single_word(self):
-        self.assertEqual(tid.genus_from_authoritative("Cixius"), "Cixius")
+        self.assertEqual(tid_data.genus_from_authoritative("Cixius"), "Cixius")
 
     def test_empty(self):
-        self.assertIsNone(tid.genus_from_authoritative(""))
-        self.assertIsNone(tid.genus_from_authoritative("   "))
+        self.assertIsNone(tid_data.genus_from_authoritative(""))
+        self.assertIsNone(tid_data.genus_from_authoritative("   "))
 
 
 class TestFilterByMinCount(unittest.TestCase):
@@ -43,7 +52,7 @@ class TestFilterByMinCount(unittest.TestCase):
             ("b/1.jpg", "Beta"),
         ]
         labeled += [(f"a/{i}.jpg", "Alpha") for i in range(3, 11)]
-        out = tid.filter_by_min_count(labeled, min_count=10)
+        out = tid_data.filter_by_min_count(labeled, min_count=10)
         genera = {g for _, g in out}
         self.assertEqual(genera, {"Alpha"})
         self.assertEqual(len(out), 10)
@@ -58,12 +67,12 @@ class TestFilterByQuality(unittest.TestCase):
             "b/just_above.jpg": 0.2500001,
         }
         labeled = [(rel, "Alpha") for rel in ratings]
-        out = tid.filter_labeled_by_quality(labeled, ratings)
+        out = tid_data.filter_labeled_by_quality(labeled, ratings)
         self.assertEqual([rel for rel, _ in out], ["a/high.jpg", "b/just_above.jpg"])
 
     def test_drops_when_rating_missing(self):
         labeled = [("a/ok.jpg", "Alpha"), ("a/missing.jpg", "Alpha")]
-        out = tid.filter_labeled_by_quality(labeled, {"a/ok.jpg": 0.9})
+        out = tid_data.filter_labeled_by_quality(labeled, {"a/ok.jpg": 0.9})
         self.assertEqual(out, [("a/ok.jpg", "Alpha")])
 
     def test_filters_all_splits(self):
@@ -81,27 +90,27 @@ class TestFilterByQuality(unittest.TestCase):
             "val": [{"crop_path": "a/val_ok.jpg", "genus": "Alpha"}],
             "test": [{"crop_path": "a/test_low.jpg", "genus": "Alpha"}],
         }
-        out = tid.filter_splits_by_quality(splits, ratings)
+        out = tid_data.filter_splits_by_quality(splits, ratings)
         self.assertEqual(out["train"], [{"crop_path": "a/train_ok.jpg", "genus": "Alpha"}])
         self.assertEqual(out["val"], [{"crop_path": "a/val_ok.jpg", "genus": "Alpha"}])
         self.assertEqual(out["test"], [])
 
     def test_quality_json_path(self):
         self.assertEqual(
-            tid.quality_ratings_path("bugs"),
-            tid.PROCESSED_DIR / "bugs" / "quality.json",
+            tid_data.quality_ratings_path("bugs"),
+            tid_config.PROCESSED_DIR / "bugs" / "quality.json",
         )
 
 
 class TestLetterbox(unittest.TestCase):
     def test_square_output(self):
         img = Image.new("RGB", (100, 50), (255, 0, 0))
-        out = tid.letterbox(img, 64, fill=0)
+        out = tid_dataset.letterbox(img, 64, fill=0)
         self.assertEqual(out.size, (64, 64))
 
     def test_tall_image(self):
         img = Image.new("RGB", (40, 80), (0, 255, 0))
-        out = tid.letterbox(img, 32, fill=0)
+        out = tid_dataset.letterbox(img, 32, fill=0)
         self.assertEqual(out.size, (32, 32))
 
 
@@ -240,11 +249,11 @@ class TestCropSkipsExistingCropAndRating(unittest.TestCase):
 class TestListProcessed(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self._orig = tid.PROCESSED_DIR
-        tid.PROCESSED_DIR = self.tmp
+        self._orig = tid_config.PROCESSED_DIR
+        tid_config.PROCESSED_DIR = self.tmp
 
     def tearDown(self):
-        tid.PROCESSED_DIR = self._orig
+        tid_config.PROCESSED_DIR = self._orig
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_lists_images(self):
@@ -252,7 +261,7 @@ class TestListProcessed(unittest.TestCase):
         root.mkdir(parents=True)
         (root / "a.jpg").write_bytes(b"x")
         (root / "notes.txt").write_text("nope")
-        paths = tid.list_processed_image_paths("bugs")
+        paths = tid_data.list_processed_image_paths("bugs")
         self.assertEqual(paths, ["bugs/col/Genus_sp/a.jpg"])
 
 
@@ -266,21 +275,23 @@ class TestFrozenSplits(unittest.TestCase):
                 "test": [{"crop_path": "b/1.jpg", "genus": "Beta"}],
             }
             path = tmp / "splits.json"
-            tid.write_splits(path, splits)
-            loaded = tid.load_splits(path)
+            tid_data.write_splits(path, splits)
+            loaded = tid_data.load_splits(path)
             self.assertEqual(loaded, splits)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_frozen_path_is_outside_run_dir(self):
-        path = tid.frozen_splits_path("bugs")
-        self.assertEqual(path, tid.MODELS_DIR / "bugs" / "identification" / "splits.json")
+        path = tid_data.frozen_splits_path("bugs")
+        self.assertEqual(
+            path, tid_config.MODELS_DIR / "bugs" / "identification" / "splits.json"
+        )
 
 
 class TestInverseSqrtWeights(unittest.TestCase):
     def test_rarer_class_gets_higher_weight(self):
         records = [{"genus": "A"}] * 100 + [{"genus": "B"}] * 4
-        weights = tid.inverse_sqrt_sample_weights(records)
+        weights = tid_data.inverse_sqrt_sample_weights(records)
         self.assertGreater(weights[-1], weights[0])
         self.assertAlmostEqual(weights[0], 1.0 / (100 ** 0.5))
         self.assertAlmostEqual(weights[-1], 1.0 / (4 ** 0.5))
@@ -291,7 +302,7 @@ class TestWorstClassRecalls(unittest.TestCase):
         idx_to_class = {0: "Alpha", 1: "Beta"}
         y_true = [0, 0, 1, 1]
         y_pred = [0, 0, 1, 0]
-        rows = tid.worst_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=1)
+        rows = tid_train.worst_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=1)
         self.assertEqual(rows[0]["genus"], "Beta")
         self.assertAlmostEqual(rows[0]["recall"], 0.5)
         self.assertEqual(rows[1]["genus"], "Alpha")
@@ -301,14 +312,14 @@ class TestWorstClassRecalls(unittest.TestCase):
         idx_to_class = {0: "Alpha", 1: "Beta"}
         y_true = [0] * 8 + [1, 1]
         y_pred = [0] * 8 + [1, 0]
-        rows = tid.worst_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=8)
+        rows = tid_train.worst_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=8)
         self.assertEqual([r["genus"] for r in rows], ["Alpha"])
 
     def test_ties_prefer_larger_support(self):
         idx_to_class = {0: "Alpha", 1: "Beta"}
         y_true = [0] * 8 + [1] * 12
         y_pred = [1] * 8 + [0] * 12
-        rows = tid.worst_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=8)
+        rows = tid_train.worst_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=8)
         self.assertEqual([r["genus"] for r in rows], ["Beta", "Alpha"])
 
 
@@ -317,7 +328,7 @@ class TestBestClassRecalls(unittest.TestCase):
         idx_to_class = {0: "Alpha", 1: "Beta"}
         y_true = [0, 0, 1, 1]
         y_pred = [0, 0, 1, 0]
-        rows = tid.best_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=1)
+        rows = tid_train.best_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=1)
         self.assertEqual(rows[0]["genus"], "Alpha")
         self.assertAlmostEqual(rows[0]["recall"], 1.0)
         self.assertEqual(rows[1]["genus"], "Beta")
@@ -327,7 +338,7 @@ class TestBestClassRecalls(unittest.TestCase):
         idx_to_class = {0: "Alpha", 1: "Beta"}
         y_true = [0] * 8 + [1] * 12
         y_pred = [0] * 8 + [1] * 12
-        rows = tid.best_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=8)
+        rows = tid_train.best_class_recalls(y_true, y_pred, idx_to_class, k=2, min_support=8)
         self.assertEqual([r["genus"] for r in rows], ["Beta", "Alpha"])
 
 
@@ -342,7 +353,7 @@ class TestFilterEvalByQuality(unittest.TestCase):
         y_true = [0, 1, 2, 3]
         y_pred = [0, 1, 0, 3]
         ratings = {"a/high.jpg": 0.9, "a/edge.jpg": 0.7, "a/low.jpg": 0.69}
-        yt, yp = tid.filter_eval_by_quality(records, y_true, y_pred, ratings, 0.7)
+        yt, yp = tid_train.filter_eval_by_quality(records, y_true, y_pred, ratings, 0.7)
         self.assertEqual(yt, [0, 1])
         self.assertEqual(yp, [0, 1])
 
@@ -352,15 +363,14 @@ class TestClassificationMetrics(unittest.TestCase):
         # class 0: 2/2 correct; class 1 absent from y_true
         y_true = [0, 0]
         y_pred = [0, 0]
-        all_classes = tid.classification_metrics(y_true, y_pred, num_classes=2)
-        present = tid.classification_metrics(
+        all_classes = tid_train.classification_metrics(y_true, y_pred, num_classes=2)
+        present = tid_train.classification_metrics(
             y_true, y_pred, num_classes=2, skip_empty=True
         )
         self.assertAlmostEqual(all_classes["macro_f1"], 0.5)
         self.assertAlmostEqual(present["macro_f1"], 1.0)
         self.assertEqual(present["n"], 2)
         self.assertEqual(present["num_classes"], 1)
-
 
 
 if __name__ == "__main__":
