@@ -46,15 +46,6 @@ VAL_FRAC = 0.20
 TEST_FRAC = 0.10
 SEED = 13
 
-# Per-collection emphasis (folder names under images_processed/<project>/).
-# Unlisted collections default to 1.0. Excluded collections are dropped from
-# train, val, and test entirely.
-COLLECTION_WEIGHTS = {
-    "inaturalist": 0.8,
-    "britishbugs": 1.2,
-}
-EXCLUDE_COLLECTIONS = frozenset({"truehopperswp"})
-
 # Evaluation image size (used for val/test).
 IMG_SIZE = 384
 # Training image size (used for train, to speed up CPU augmentation + training).
@@ -130,67 +121,6 @@ def genus_from_authoritative(authoritative_name: str) -> str | None:
 
 def folder_name_from_image_path(rel_path: str) -> str:
     return Path(rel_path).parent.name
-
-
-def collection_from_crop_path(crop_path: str) -> str:
-    """Collection folder: project/collection/taxon/file.jpg -> collection."""
-    parts = crop_path.replace("\\", "/").split("/")
-    if len(parts) < 2:
-        raise ValueError(f"unexpected crop_path: {crop_path}")
-    return parts[1]
-
-
-def collection_weight(crop_path: str) -> float:
-    return COLLECTION_WEIGHTS.get(collection_from_crop_path(crop_path), 1.0)
-
-
-def collection_weights_for(records: list[dict]) -> list[float]:
-    return [collection_weight(r["crop_path"]) for r in records]
-
-
-def filter_excluded_collections(
-    labeled: list[tuple[str, str]],
-) -> list[tuple[str, str]]:
-    return [
-        (path, genus)
-        for path, genus in labeled
-        if collection_from_crop_path(path) not in EXCLUDE_COLLECTIONS
-    ]
-
-
-def filter_splits_excluded_collections(
-    splits: dict[str, list[dict]],
-    logger: logging.Logger | None = None,
-) -> dict[str, list[dict]]:
-    dropped = 0
-    out: dict[str, list[dict]] = {}
-    for key, recs in splits.items():
-        kept = [
-            r
-            for r in recs
-            if collection_from_crop_path(r["crop_path"]) not in EXCLUDE_COLLECTIONS
-        ]
-        dropped += len(recs) - len(kept)
-        out[key] = kept
-    if logger:
-        _log(
-            logger,
-            f"excluded collections {sorted(EXCLUDE_COLLECTIONS)}: dropped={dropped}",
-        )
-    return out
-
-
-def _log_collection_mix(
-    logger: logging.Logger,
-    splits: dict[str, list[dict]],
-) -> None:
-    for split, recs in splits.items():
-        counts = Counter(collection_from_crop_path(r["crop_path"]) for r in recs)
-        parts = [
-            f"{name}={n}(w={COLLECTION_WEIGHTS.get(name, 1.0)})"
-            for name, n in sorted(counts.items())
-        ]
-        _log(logger, f"collections {split}: " + ", ".join(parts))
 
 
 def build_folder_to_genus(project: str) -> dict[str, str]:
@@ -301,12 +231,6 @@ def inverse_sqrt_sample_weights(records: list[dict]) -> list[float]:
     counts = Counter(r["genus"] for r in records)
     class_w = {g: 1.0 / (n ** 0.5) for g, n in counts.items()}
     return [class_w[r["genus"]] for r in records]
-
-
-def train_sample_weights(records: list[dict]) -> list[float]:
-    """Inverse-sqrt class weights multiplied by per-collection emphasis."""
-    class_w = inverse_sqrt_sample_weights(records)
-    return [cw * collection_weight(r["crop_path"]) for cw, r in zip(class_w, records)]
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +384,7 @@ class FocalLoss:
         self.gamma = gamma
         self.alpha = alpha
 
-    def __call__(self, logits, targets, sample_weight=None):
+    def __call__(self, logits, targets):
         import torch.nn.functional as F
 
         log_probs = F.log_softmax(logits, dim=1)
@@ -469,10 +393,7 @@ class FocalLoss:
         log_pt = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
         pt = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
         loss = -self.alpha * (1.0 - pt) ** self.gamma * log_pt
-        if sample_weight is None:
-            return loss.mean()
-        w = sample_weight.to(dtype=loss.dtype, device=loss.device)
-        return (loss * w).sum() / w.sum().clamp_min(1e-12)
+        return loss.mean()
 
 
 def pick_device():
@@ -607,14 +528,12 @@ def _macro_f1(
     y_pred: list[int],
     num_classes: int,
     skip_empty: bool = False,
-    sample_weights: list[float] | None = None,
 ) -> float:
-    weights = sample_weights if sample_weights is not None else [1.0] * len(y_true)
     f1s = []
     for c in range(num_classes):
-        tp = sum(w for t, p, w in zip(y_true, y_pred, weights) if t == c and p == c)
-        fp = sum(w for t, p, w in zip(y_true, y_pred, weights) if t != c and p == c)
-        fn = sum(w for t, p, w in zip(y_true, y_pred, weights) if t == c and p != c)
+        tp = sum(1 for t, p in zip(y_true, y_pred) if t == c and p == c)
+        fp = sum(1 for t, p in zip(y_true, y_pred) if t != c and p == c)
+        fn = sum(1 for t, p in zip(y_true, y_pred) if t == c and p != c)
         if skip_empty and (tp + fn) == 0:
             continue
         prec = tp / (tp + fp) if (tp + fp) else 0.0
@@ -629,26 +548,13 @@ def classification_metrics(
     y_pred: list[int],
     num_classes: int,
     skip_empty: bool = False,
-    sample_weights: list[float] | None = None,
 ) -> dict:
     n = len(y_true)
-    if n == 0:
-        top1 = 0.0
-    elif sample_weights is None:
-        top1 = sum(1 for t, p in zip(y_true, y_pred) if t == p) / n
-    else:
-        wsum = sum(sample_weights)
-        top1 = (
-            sum(w for t, p, w in zip(y_true, y_pred, sample_weights) if t == p) / wsum
-            if wsum
-            else 0.0
-        )
+    top1 = sum(1 for t, p in zip(y_true, y_pred) if t == p) / n if n else 0.0
     present = {t for t in y_true}
     return {
         "top1": top1,
-        "macro_f1": _macro_f1(
-            y_true, y_pred, num_classes, skip_empty=skip_empty, sample_weights=sample_weights
-        ),
+        "macro_f1": _macro_f1(y_true, y_pred, num_classes, skip_empty=skip_empty),
         "n": n,
         "num_classes": len(present),
     }
@@ -660,22 +566,16 @@ def filter_eval_by_quality(
     y_pred: list[int],
     ratings: dict[str, float],
     min_quality: float,
-    sample_weights: list[float] | None = None,
-) -> tuple:
+) -> tuple[list[int], list[int]]:
     """Keep eval pairs whose saved quality is at or above min_quality."""
     kept_true: list[int] = []
     kept_pred: list[int] = []
-    kept_w: list[float] = []
-    for i, (rec, t, p) in enumerate(zip(records, y_true, y_pred)):
+    for rec, t, p in zip(records, y_true, y_pred):
         score = ratings.get(rec["crop_path"])
         if score is not None and score >= min_quality:
             kept_true.append(t)
             kept_pred.append(p)
-            if sample_weights is not None:
-                kept_w.append(sample_weights[i])
-    if sample_weights is None:
-        return kept_true, kept_pred
-    return kept_true, kept_pred, kept_w
+    return kept_true, kept_pred
 
 
 def class_recall_rows(
@@ -683,17 +583,14 @@ def class_recall_rows(
     y_pred: list[int],
     idx_to_class: dict[int, str],
     min_support: int = MIN_RECALL_SUPPORT,
-    sample_weights: list[float] | None = None,
 ) -> list[dict]:
-    weights = sample_weights if sample_weights is not None else [1.0] * len(y_true)
     rows = []
     for c, name in idx_to_class.items():
         support = sum(1 for t in y_true if t == c)
         if support < min_support:
             continue
-        w_support = sum(w for t, w in zip(y_true, weights) if t == c)
-        tp = sum(w for t, p, w in zip(y_true, y_pred, weights) if t == c and p == c)
-        rows.append({"genus": name, "recall": tp / w_support, "support": support})
+        tp = sum(1 for t, p in zip(y_true, y_pred) if t == c and p == c)
+        rows.append({"genus": name, "recall": tp / support, "support": support})
     return rows
 
 
@@ -703,15 +600,8 @@ def worst_class_recalls(
     idx_to_class: dict[int, str],
     k: int = WORST_CLASSES_TO_LOG,
     min_support: int = MIN_RECALL_SUPPORT,
-    sample_weights: list[float] | None = None,
 ) -> list[dict]:
-    rows = class_recall_rows(
-        y_true,
-        y_pred,
-        idx_to_class,
-        min_support=min_support,
-        sample_weights=sample_weights,
-    )
+    rows = class_recall_rows(y_true, y_pred, idx_to_class, min_support=min_support)
     rows.sort(key=lambda r: (r["recall"], -r["support"], r["genus"]))
     return rows[:k]
 
@@ -722,15 +612,8 @@ def best_class_recalls(
     idx_to_class: dict[int, str],
     k: int = WORST_CLASSES_TO_LOG,
     min_support: int = MIN_RECALL_SUPPORT,
-    sample_weights: list[float] | None = None,
 ) -> list[dict]:
-    rows = class_recall_rows(
-        y_true,
-        y_pred,
-        idx_to_class,
-        min_support=min_support,
-        sample_weights=sample_weights,
-    )
+    rows = class_recall_rows(y_true, y_pred, idx_to_class, min_support=min_support)
     rows.sort(key=lambda r: (-r["recall"], -r["support"], r["genus"]))
     return rows[:k]
 
@@ -752,20 +635,12 @@ def _log_class_recalls(
     )
 
 
-def evaluate(
-    model,
-    loader,
-    criterion,
-    device,
-    num_classes: int,
-    sample_weights: list[float] | None = None,
-) -> tuple[dict, list[int], list[int]]:
+def evaluate(model, loader, criterion, device, num_classes: int) -> tuple[dict, list[int], list[int]]:
     import torch
 
     model.eval()
     loss_sum = 0.0
-    n = 0.0
-    offset = 0
+    n = 0
     y_true: list[int] = []
     y_pred: list[int] = []
     with torch.no_grad():
@@ -774,27 +649,13 @@ def evaluate(
             x = _maybe_normalize_on_device(x)
             y = y.to(device)
             logits = model(x)
-            bs = x.size(0)
-            if sample_weights is None:
-                loss = criterion(logits, y)
-                wsum = float(bs)
-            else:
-                w = torch.tensor(
-                    sample_weights[offset : offset + bs],
-                    device=device,
-                    dtype=torch.float32,
-                )
-                loss = criterion(logits, y, sample_weight=w)
-                wsum = float(w.sum().item())
-            loss_sum += float(loss.item()) * wsum
-            n += wsum
-            offset += bs
+            loss = criterion(logits, y)
+            loss_sum += float(loss.item()) * x.size(0)
+            n += x.size(0)
             pred = logits.argmax(dim=1)
             y_true.extend(y.cpu().tolist())
             y_pred.extend(pred.cpu().tolist())
-    cls = classification_metrics(
-        y_true, y_pred, num_classes, sample_weights=sample_weights
-    )
+    cls = classification_metrics(y_true, y_pred, num_classes)
     metrics = {
         "loss": loss_sum / n if n else 0.0,
         "top1": cls["top1"],
@@ -820,9 +681,7 @@ def _hyperparams() -> dict:
         "focal_alpha": FOCAL_ALPHA,
         "patience": PATIENCE,
         "seed": SEED,
-        "sampler": "inverse_sqrt_x_collection",
-        "collection_weights": COLLECTION_WEIGHTS,
-        "exclude_collections": sorted(EXCLUDE_COLLECTIONS),
+        "sampler": "inverse_sqrt",
     }
 
 
@@ -870,7 +729,6 @@ def run_epochs(
     run_dir: Path | None = None,
     class_to_idx: dict[str, int] | None = None,
     idx_to_class: dict[int, str] | None = None,
-    val_sample_weights: list[float] | None = None,
 ) -> tuple[dict | None, float, int]:
     stale = 0
     last_epoch = 0
@@ -902,14 +760,7 @@ def run_epochs(
             scheduler.step()
 
         train_loss = loss_sum / n if n else 0.0
-        val_metrics, _, _ = evaluate(
-            model,
-            val_loader,
-            criterion,
-            device,
-            num_classes,
-            sample_weights=val_sample_weights,
-        )
+        val_metrics, _, _ = evaluate(model, val_loader, criterion, device, num_classes)
         lr_msg = ""
         if scheduler is not None:
             lrs = [g["lr"] for g in optimizer.param_groups]
@@ -954,27 +805,15 @@ def _high_quality_report(
     ratings: dict[str, float],
     idx_to_class: dict[int, str],
     num_classes: int,
-    sample_weights: list[float] | None = None,
 ) -> dict:
-    filtered = filter_eval_by_quality(
-        records, y_true, y_pred, ratings, HIGH_QUALITY, sample_weights=sample_weights
+    hq_true, hq_pred = filter_eval_by_quality(
+        records, y_true, y_pred, ratings, HIGH_QUALITY
     )
-    if sample_weights is None:
-        hq_true, hq_pred = filtered
-        hq_w = None
-    else:
-        hq_true, hq_pred, hq_w = filtered
-    metrics = classification_metrics(
-        hq_true, hq_pred, num_classes, skip_empty=True, sample_weights=hq_w
-    )
+    metrics = classification_metrics(hq_true, hq_pred, num_classes, skip_empty=True)
     return {
         **metrics,
-        "worst_recall": worst_class_recalls(
-            hq_true, hq_pred, idx_to_class, sample_weights=hq_w
-        ),
-        "best_recall": best_class_recalls(
-            hq_true, hq_pred, idx_to_class, sample_weights=hq_w
-        ),
+        "worst_recall": worst_class_recalls(hq_true, hq_pred, idx_to_class),
+        "best_recall": best_class_recalls(hq_true, hq_pred, idx_to_class),
     }
 
 
@@ -985,14 +824,9 @@ def _log_split_recalls(
     y_pred: list[int],
     idx_to_class: dict[int, str],
     hq: dict,
-    sample_weights: list[float] | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    worst = worst_class_recalls(
-        y_true, y_pred, idx_to_class, sample_weights=sample_weights
-    )
-    best = best_class_recalls(
-        y_true, y_pred, idx_to_class, sample_weights=sample_weights
-    )
+    worst = worst_class_recalls(y_true, y_pred, idx_to_class)
+    best = best_class_recalls(y_true, y_pred, idx_to_class)
     _log_class_recalls(logger, "worst", split, worst)
     _log_class_recalls(logger, "best", split, best)
     _log_class_recalls(logger, "worst", f"{split} high_quality", hq["worst_recall"])
@@ -1040,15 +874,13 @@ def train_model(
     val_ds = CropDataset(splits["val"], class_to_idx, train=False, img_size=IMG_SIZE, logger=logger)
     test_ds = CropDataset(splits["test"], class_to_idx, train=False, img_size=IMG_SIZE, logger=logger)
 
-    sample_weights = train_sample_weights(splits["train"])
+    sample_weights = inverse_sqrt_sample_weights(splits["train"])
     sampler = WeightedRandomSampler(
         weights=sample_weights,
         num_samples=len(sample_weights),
         replacement=True,
     )
-    _log(logger, "train sampler=inverse_sqrt * collection_weight (WeightedRandomSampler)")
-    val_weights = collection_weights_for(splits["val"])
-    test_weights = collection_weights_for(splits["test"])
+    _log(logger, "train sampler=inverse_sqrt (WeightedRandomSampler)")
 
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=NUM_WORKERS
@@ -1075,7 +907,6 @@ def train_model(
         "run_dir": run_dir,
         "class_to_idx": class_to_idx,
         "idx_to_class": idx_to_class,
-        "val_sample_weights": val_weights,
     }
 
     # Phase A: head only
@@ -1155,28 +986,16 @@ def train_model(
         model.load_state_dict(best_state)
 
     val_metrics, val_true, val_pred = evaluate(
-        model, val_loader, criterion, device, num_classes, sample_weights=val_weights
+        model, val_loader, criterion, device, num_classes
     )
     test_metrics, test_true, test_pred = evaluate(
-        model, test_loader, criterion, device, num_classes, sample_weights=test_weights
+        model, test_loader, criterion, device, num_classes
     )
     val_hq = _high_quality_report(
-        splits["val"],
-        val_true,
-        val_pred,
-        ratings,
-        idx_to_class,
-        num_classes,
-        sample_weights=val_weights,
+        splits["val"], val_true, val_pred, ratings, idx_to_class, num_classes
     )
     test_hq = _high_quality_report(
-        splits["test"],
-        test_true,
-        test_pred,
-        ratings,
-        idx_to_class,
-        num_classes,
-        sample_weights=test_weights,
+        splits["test"], test_true, test_pred, ratings, idx_to_class, num_classes
     )
     _log(
         logger,
@@ -1192,16 +1011,10 @@ def train_model(
         f"test_top1={test_hq['top1']:.4f} test_macro_f1={test_hq['macro_f1']:.4f}",
     )
     val_worst, val_best = _log_split_recalls(
-        logger, "val", val_true, val_pred, idx_to_class, val_hq, sample_weights=val_weights
+        logger, "val", val_true, val_pred, idx_to_class, val_hq
     )
     test_worst, test_best = _log_split_recalls(
-        logger,
-        "test",
-        test_true,
-        test_pred,
-        idx_to_class,
-        test_hq,
-        sample_weights=test_weights,
+        logger, "test", test_true, test_pred, idx_to_class, test_hq
     )
 
     save_best_checkpoint(
@@ -1265,11 +1078,6 @@ def main() -> None:
     _log(logger, f"run_dir={run_dir}")
     _log(logger, f"project={PROJECT} identification_rank={rank}")
     _log(logger, f"processed_dir={processed_root}")
-    _log(
-        logger,
-        f"collection_weights={COLLECTION_WEIGHTS} "
-        f"exclude={sorted(EXCLUDE_COLLECTIONS)} default=1.0",
-    )
 
     ratings_path = quality_ratings_path(PROJECT)
     if not ratings_path.is_file():
@@ -1288,18 +1096,10 @@ def main() -> None:
     if frozen_path.is_file():
         splits = load_splits(frozen_path)
         _log(logger, f"using frozen splits {frozen_path}")
-        splits = filter_splits_excluded_collections(splits, logger)
         splits = filter_splits_by_quality(splits, ratings, logger)
     else:
         labeled = collect_labeled_paths(PROJECT)
         _log(logger, f"harmonized processed images: {len(labeled)}")
-        before_exclude = len(labeled)
-        labeled = filter_excluded_collections(labeled)
-        _log(
-            logger,
-            f"excluded collections {sorted(EXCLUDE_COLLECTIONS)}: "
-            f"dropped={before_exclude - len(labeled)} kept={len(labeled)}",
-        )
         labeled = filter_labeled_by_quality(labeled, ratings, logger)
         labeled = filter_by_min_count(labeled, MIN_IMAGES_PER_CLASS)
         genus_counts = Counter(g for _, g in labeled)
@@ -1332,7 +1132,6 @@ def main() -> None:
         logger,
         f"split: train={len(splits['train'])} val={len(splits['val'])} test={len(splits['test'])}",
     )
-    _log_collection_mix(logger, splits)
 
     metrics = train_model(run_dir, splits, logger, ratings)
     _log(logger, f"done. metrics={json.dumps(metrics)}")
