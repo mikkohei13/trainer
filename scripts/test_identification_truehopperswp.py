@@ -3,9 +3,9 @@ Run the identification model on already-cropped images in
 trainer/images_processed/<project>/truehopperswp.
 
 Ground-truth genus is the first `_`-separated part of the species folder
-name (e.g. Aphrophora_alni → Aphrophora). Ebarrius and Wagneriala are
-excluded (the model was not trained on them). Prints top-1, top-3, and
-macro-F1, and writes a confusion matrix next to the run.
+name (e.g. Aphrophora_alni → Aphrophora). Images whose genus is not in
+the checkpoint are skipped. Prints top-1, top-3, and macro-F1, and
+writes a confusion matrix next to the run.
 
     uv run python scripts/test_identification_truehopperswp.py
 """
@@ -20,10 +20,9 @@ from PIL import Image, UnidentifiedImageError
 from trainer.images import IMAGE_EXTS
 
 PROJECT = "auchenorrhyncha"
-RUN_ID = "20260818-223637"
+RUN_ID = "20260820-000744"
 TOP_K = 3
 TOP_CONFUSIONS = 20
-EXCLUDED_GENERA = {"Ebarrius", "Wagneriala"}
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUN_DIR = PROJECT_ROOT / "trainer" / "models" / PROJECT / "identification" / RUN_ID
@@ -73,10 +72,23 @@ def genus_from_folder(folder_name: str) -> str:
 def list_test_images(test_dir: Path) -> list[Path]:
     return sorted(
         p for p in test_dir.rglob("*")
-        if p.is_file()
-        and p.suffix.lower() in IMAGE_EXTS
-        and genus_from_folder(p.parent.name) not in EXCLUDED_GENERA
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
     )
+
+
+def partition_known_genera(
+    images: list[Path],
+    class_to_idx: dict[str, int],
+) -> tuple[list[Path], dict[str, int]]:
+    known: list[Path] = []
+    skipped: dict[str, int] = {}
+    for path in images:
+        genus = genus_from_folder(path.parent.name)
+        if genus in class_to_idx:
+            known.append(path)
+        else:
+            skipped[genus] = skipped.get(genus, 0) + 1
+    return known, skipped
 
 
 def load_model(ckpt_path: Path, device):
@@ -197,6 +209,9 @@ def main() -> None:
 
     device = pick_device()
     model, class_to_idx, idx_to_class, img_size = load_model(CHECKPOINT, device)
+    images, skipped = partition_known_genera(images, class_to_idx)
+    if not images:
+        raise SystemExit("No images whose genus is in the checkpoint")
 
     print(f"run={RUN_DIR}")
     print(f"test_dir={TEST_DIR}")
@@ -248,9 +263,13 @@ def main() -> None:
     write_confusion_matrix(cm, names, confusion_png, confusion_csv)
     pairs = confused_pairs(cm, names, TOP_CONFUSIONS)
 
+    skipped_parts = [
+        f"{genus}={count}" for genus, count in sorted(skipped.items())
+    ]
+
     print()
     print(f"n_eval={n}")
-    print(f"excluded_genera={', '.join(sorted(EXCLUDED_GENERA))}")
+    print(f"skipped_unknown_genera={', '.join(skipped_parts) if skipped_parts else '(none)'}")
     print(f"n_unreadable={n_unreadable}")
     print(f"top1={top1:.4f}")
     print(f"top3={top3:.4f}")
