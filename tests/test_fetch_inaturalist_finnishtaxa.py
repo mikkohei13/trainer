@@ -102,8 +102,16 @@ class TestDownloadSkipsExistingIds(unittest.TestCase):
         seen_ids: set[int] = set()
         observations = [
             {
+                "id": 1001,
+                "user": {"login": "observer", "name": "Ada Observer"},
                 "taxon": {"name": "Cixius"},
-                "photos": [{"id": 42, "url": "https://example.com/photos/42/square.jpg"}],
+                "photos": [
+                    {
+                        "id": 42,
+                        "url": "https://example.com/photos/42/square.jpg",
+                        "license_code": "cc-by-nc",
+                    }
+                ],
             }
         ]
 
@@ -113,13 +121,24 @@ class TestDownloadSkipsExistingIds(unittest.TestCase):
                     observations, existing_ids, seen_ids, "Cixius"
                 )
 
-        http_bytes.assert_called_once()
+        http_bytes.assert_called_once_with(
+            "https://example.com/photos/42/original.jpg"
+        )
         self.assertEqual(downloaded, 1)
         self.assertEqual(skipped, 0)
         self.assertEqual(already_existed, 0)
         self.assertEqual(existing_ids, {42})
         self.assertEqual(seen_ids, {42})
-        self.assertEqual((self.tmp / "Cixius" / "42.jpg").read_bytes(), b"img")
+        out_dir = self.tmp / "Cixius"
+        self.assertEqual((out_dir / "42.jpg").read_bytes(), b"img")
+        self.assertEqual(
+            json.loads((out_dir / "42.json").read_text(encoding="utf-8")),
+            {
+                "observation_id": 1001,
+                "license": "cc-by-nc",
+                "photographer": "Ada Observer",
+            },
+        )
 
     def test_stops_after_max_new_saves_ignoring_existing_on_disk(self):
         existing_ids = {1}

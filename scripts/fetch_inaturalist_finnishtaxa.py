@@ -1,6 +1,7 @@
 """
 Fetch observation photos from iNaturalist for FinBIF genera and species listed
-in taxa.json. One folder per taxon (Genus_species), files named <photo_id>.jpg.
+in taxa.json. One folder per taxon (Genus_species), files named <photo_id>.jpg
+plus <photo_id>.json metadata (observation id, license, photographer).
 
 Looks up each FinBIF scientific name and its synonyms on the iNaturalist taxa
 API, then queries observations for the matching taxon ids. Images are always
@@ -35,7 +36,11 @@ handled_log_path = images_path / "inaturalist_finnishtaxa.log"
 
 ALLOWED_RANKS = {"MX.species", "MX.genus"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
-MAX_IMAGES_PER_TAXON = 50
+MAX_IMAGES_PER_TAXON = 400
+
+INAT_PER_PAGE_LIMIT = 200
+PER_PAGE = min(MAX_IMAGES_PER_TAXON, INAT_PER_PAGE_LIMIT)
+
 
 # Mirrors https://www.inaturalist.org/observations?hrank=genus&lat=64.893&lng=25.845&
 # quality_grade=research&radius=2000&verifiable=any
@@ -46,10 +51,13 @@ QUERY_PARAMS: dict = {
     "radius": 2500,
     "quality_grade": "research",
     "hrank": "genus",
-    "per_page": 200,
+    "per_page": PER_PAGE,
     "order_by": "id",
-    "order": "asc",
-    "fields": "(photos:(id:!t,url:!t),taxon:(name:!t,rank:!t))",
+    "order": "desc",
+    "fields": (
+        "(id:!t,photos:(id:!t,url:!t,license_code:!t),"
+        "taxon:(name:!t,rank:!t),user:(login:!t,name:!t))"
+    ),
 }
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
@@ -103,10 +111,31 @@ def _folder_name(scientific_name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", folder)
 
 
-def _square_url_to_large(square_url: str) -> str:
+def _square_url_to_original(square_url: str) -> str:
     if "/square." in square_url:
-        return square_url.replace("/square.", "/large.")
-    return re.sub(r"/[^/]+\.(jpg|jpeg|png)(\?.*)?$", "/large.jpg", square_url, flags=re.I)
+        return square_url.replace("/square.", "/original.")
+    return re.sub(r"/[^/]+\.(jpg|jpeg|png)(\?.*)?$", "/original.jpg", square_url, flags=re.I)
+
+
+def _photographer_name(obs: dict) -> str | None:
+    user = obs.get("user") or {}
+    name = (user.get("name") or "").strip()
+    if name:
+        return name
+    login = (user.get("login") or "").strip()
+    return login or None
+
+
+def _photo_metadata(obs: dict, photo: dict) -> dict:
+    return {
+        "observation_id": obs.get("id"),
+        "license": photo.get("license_code"),
+        "photographer": _photographer_name(obs),
+    }
+
+
+def _write_photo_metadata(path: Path, metadata: dict) -> None:
+    path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def load_existing_photo_ids(root: Path) -> set[int]:
@@ -258,17 +287,22 @@ def download_observation_photos(
                 skipped += 1
                 continue
             out_file = out_dir / f"{photo_id}.jpg"
+            meta_file = out_dir / f"{photo_id}.json"
+            metadata = _photo_metadata(obs, photo)
             if photo_id in existing_ids or out_file.is_file():
+                if out_file.is_file() and not meta_file.is_file():
+                    _write_photo_metadata(meta_file, metadata)
                 already_existed += 1
                 continue
             if photo_id in seen_ids:
                 continue
             seen_ids.add(photo_id)
 
-            large_url = _square_url_to_large(photo["url"])
+            original_url = _square_url_to_original(photo["url"])
             print(f"Scientific name: {scientific_name}, photo {photo_id}")
-            print(f"Downloading image from {large_url}, saving to {out_file}")
-            out_file.write_bytes(_http_bytes(large_url))
+            print(f"Downloading image from {original_url}, saving to {out_file}")
+            out_file.write_bytes(_http_bytes(original_url))
+            _write_photo_metadata(meta_file, metadata)
             existing_ids.add(photo_id)
             downloaded += 1
 

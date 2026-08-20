@@ -41,6 +41,21 @@ uv run python -m unittest discover -s tests -v
 
 ## Model training
 
+Todo:
+- rename inaturalist to inaturalist-new
+- rename inaturalist-old to inaturalist. This way OD and quality model training will find rated images correctly.
+- exclude inaturalist from taxonomy harmonization and model training, so will only use the new images
+
+The whole process:
+- Fetch images from multiple sources
+- (Use images to train object detection model OD)
+- (Use images cropped with OD to train quality model)
+- Crop images with OD
+- Harmonize taxonomy to a file NN
+- Split into train/val/test
+- Train image classification model
+- Test model with NN
+
 ### Image quality model
 
 The app trains a quality regression model from manually rated images:

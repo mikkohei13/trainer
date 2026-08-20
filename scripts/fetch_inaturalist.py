@@ -1,6 +1,7 @@
 """
 Fetch observation photos from iNaturalist API v2 (api.inaturalist.org) into
-target_path: one folder per taxon (Genus_species), files named <photo_id>.jpg.
+target_path: one folder per taxon (Genus_species), files named <photo_id>.jpg
+plus <photo_id>.json metadata (observation id, license, photographer).
 
 API reference: https://api.inaturalist.org/v2/docs/
 
@@ -36,16 +37,15 @@ QUERY_PARAMS: dict = {
     "per_page": 200,
     "order_by": "id",
     "order": "asc",
-    "fields": "(photos:(id:!t,url:!t),taxon:(name:!t,rank:!t))",
+    "fields": (
+        "(id:!t,photos:(id:!t,url:!t,license_code:!t),"
+        "taxon:(name:!t,rank:!t),user:(login:!t,name:!t))"
+    ),
 }
 
 REQUEST_DELAY_SEC = 2.0
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-
-
-
-
 
 def _headers_json() -> dict:
     return {
@@ -91,10 +91,31 @@ def _folder_name(scientific_name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", folder)
 
 
-def _square_url_to_large(square_url: str) -> str:
+def _square_url_to_original(square_url: str) -> str:
     if "/square." in square_url:
-        return square_url.replace("/square.", "/large.")
-    return re.sub(r"/[^/]+\.(jpg|jpeg|png)(\?.*)?$", "/large.jpg", square_url, flags=re.I)
+        return square_url.replace("/square.", "/original.")
+    return re.sub(r"/[^/]+\.(jpg|jpeg|png)(\?.*)?$", "/original.jpg", square_url, flags=re.I)
+
+
+def _photographer_name(obs: dict) -> str | None:
+    user = obs.get("user") or {}
+    name = (user.get("name") or "").strip()
+    if name:
+        return name
+    login = (user.get("login") or "").strip()
+    return login or None
+
+
+def _photo_metadata(obs: dict, photo: dict) -> dict:
+    return {
+        "observation_id": obs.get("id"),
+        "license": photo.get("license_code"),
+        "photographer": _photographer_name(obs),
+    }
+
+
+def _write_photo_metadata(path: Path, metadata: dict) -> None:
+    path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def fetch_all_observations() -> list:
@@ -148,13 +169,19 @@ def main() -> None:
             seen_ids.add(photo_id)
 
             out_file = out_dir / f"{photo_id}.jpg"
+            meta_file = out_dir / f"{photo_id}.json"
+            metadata = _photo_metadata(obs, photo)
+
             if out_file.is_file():
+                if not meta_file.is_file():
+                    _write_photo_metadata(meta_file, metadata)
                 continue
 
-            large_url = _square_url_to_large(photo["url"])
+            original_url = _square_url_to_original(photo["url"])
             print(f"Scientific name: {scientific}, photo {photo_id}")
-            print(f"Downloading image from {large_url}, saving to {out_file}")
-            out_file.write_bytes(_http_bytes(large_url))
+            print(f"Downloading image from {original_url}, saving to {out_file}")
+            out_file.write_bytes(_http_bytes(original_url))
+            _write_photo_metadata(meta_file, metadata)
             downloaded += 1
             time.sleep(REQUEST_DELAY_SEC)
 

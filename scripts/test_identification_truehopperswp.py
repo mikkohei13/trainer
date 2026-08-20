@@ -20,7 +20,7 @@ from PIL import Image, UnidentifiedImageError
 from trainer.images import IMAGE_EXTS
 
 PROJECT = "auchenorrhyncha"
-RUN_ID = "20260820-000744"
+RUN_ID = "20260820-160614"
 TOP_K = 3
 TOP_CONFUSIONS = 20
 
